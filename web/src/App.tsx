@@ -80,6 +80,34 @@ interface StrmScan {
   preview: { source: string; number: string | null; url: string; url_ok: boolean }[];
 }
 
+interface ProxyCfg {
+  enabled: boolean;
+  kernel: string;
+  subscribe_url: string | null;
+  kernel_path: string | null;
+  port: number;
+  expose_lan: boolean;
+  external_proxy: string | null;
+}
+
+// Phase 的 serde 形式（后端 rename_all = snake_case）：
+// 无参变体是裸字符串（"disabled"），带参变体是 { 变体名: {...} }（{ "failed": {...} }）
+type ProxyPhase =
+  | 'disabled'
+  | 'starting'
+  | { running: { port: number } }
+  | { failed: { reason: string } };
+
+interface ProxyStatus {
+  enabled: boolean;
+  kernel: string;
+  port: number;
+  proxy: ProxyCfg;
+  phase: ProxyPhase;
+  effective_proxy: string | null;
+  kernel_found: boolean;
+}
+
 function App() {
   const [version, setVersion] = useState('');
   const [filename, setFilename] = useState('');
@@ -99,6 +127,9 @@ function App() {
   const [status, setStatus] = useState<StrmStatus | null>(null);
   const [stats, setStats] = useState<StrmStats | null>(null);
   const [scan, setScan] = useState<StrmScan | null>(null);
+
+  const [px, setPx] = useState<ProxyStatus | null>(null);
+  const [pxLog, setPxLog] = useState('');
 
   const [candNumber, setCandNumber] = useState('');
   const [candidates, setCandidates] = useState<Candidate[] | null>(null);
@@ -161,9 +192,15 @@ function App() {
     loadNetdisk();
     loadStatus();
     loadManual();
+    loadProxy();
     // 定时器状态会自己变（后台在跑），轮询刷新
     const t = setInterval(loadStatus, 10000);
-    return () => clearInterval(t);
+    // 内核是异步拉起的（拉订阅 + 等端口），启动中要多刷几次才能看到结果
+    const t2 = setInterval(loadProxy, 4000);
+    return () => {
+      clearInterval(t);
+      clearInterval(t2);
+    };
   }, []);
 
   const saveNetdisk = () => {
@@ -189,6 +226,45 @@ function App() {
       .catch((e) => { setMsg(String(e)); loadStatus(); });
   };
 
+  const loadProxy = () => api<ProxyStatus>('/api/proxy/status').then(setPx).catch(() => {});
+
+  const saveProxy = (enabled?: boolean) => {
+    if (!px) return;
+    const body = { proxy: { ...px.proxy, enabled: enabled ?? px.proxy.enabled } };
+    api('/api/proxy/config', { method: 'PUT', body: JSON.stringify(body) })
+      .then(() => {
+        setMsg(enabled === false ? '已停用内置内核（回落外部代理/直连）' : '代理配置已保存，正在后台拉起内核…');
+        setTimeout(loadProxy, 900);
+      })
+      .catch((e) => setMsg(String(e)));
+  };
+
+  const reloadProxy = () =>
+    api('/api/proxy/reload', { method: 'POST' })
+      .then(() => { setMsg('正在重新拉起内核…'); setTimeout(loadProxy, 1500); })
+      .catch((e) => setMsg(String(e)));
+
+  const showPxLog = () =>
+    api<{ log: string }>('/api/proxy/log?lines=80')
+      .then((j) => setPxLog(j.log || '（内核日志为空）'))
+      .catch((e) => setMsg(String(e)));
+
+  const phaseText = (p: ProxyPhase): string => {
+    // 后端 serde 用了 snake_case，无参变体是小写裸字符串
+    if (p === 'disabled') return '未启用';
+    if (p === 'starting') return '正在启动…';
+    if (typeof p === 'object' && 'running' in p) return `运行中（端口 ${p.running.port}）`;
+    if (typeof p === 'object' && 'failed' in p) return `失败：${p.failed.reason}`;
+    return String(p);
+  };
+
+  const phaseColor = (p: ProxyPhase): string => {
+    if (typeof p === 'object' && 'running' in p) return '#2a7';
+    if (typeof p === 'object' && 'failed' in p) return '#c00';
+    if (p === 'starting') return '#c60';
+    return '#666';
+  };
+
   const fmtTime = (t: number | null) =>
     t ? new Date(t * 1000).toLocaleString() : '—';
 
@@ -207,6 +283,78 @@ function App() {
           }>解析</button>
         </div>
         {parsed && <pre style={pre}>{JSON.stringify(parsed, null, 2)}</pre>}
+      </section>
+
+      <section style={card}>
+        <h3>内置代理内核</h3>
+        <p style={hint}>
+          刮削站在国内直连不通，所以软件自带内核：填你自己的订阅链接，由软件拉起内核，
+          刮削与海报下载全走它，而<b>内网（CD2 / Emby / NAS）永远直连</b>，不会被代理劫持。
+          内核二进制不随源码分发 —— 找不到就按提示放一个，或改用「外部代理」。
+        </p>
+
+        {px && (
+          <>
+            <p style={{ fontSize: 13 }}>
+              状态：<b style={{ color: phaseColor(px.phase) }}>{phaseText(px.phase)}</b>
+              {' · '}实际出网：<code>{px.effective_proxy ?? '直连（无代理）'}</code>
+              {' · '}内核二进制：
+              <b style={{ color: px.kernel_found ? '#2a7' : '#c00' }}>{px.kernel_found ? '已找到' : '未找到'}</b>
+            </p>
+
+            {!px.kernel_found && (
+              <p style={{ fontSize: 12, color: '#c00' }}>
+                把 <code>mihomo</code> 放到程序同目录，或在下面填「内核路径」。
+                没有内核时请先关闭开关、改填「外部代理」。
+              </p>
+            )}
+
+            <div style={grid}>
+              <label style={{ ...lbl, gridColumn: '1 / -1' }}>订阅链接（只填你自己的，软件不预置任何节点）
+                <input style={input} value={px.proxy.subscribe_url ?? ''} placeholder="https://..."
+                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, subscribe_url: e.target.value || null } })} />
+              </label>
+              <label style={lbl}>内核
+                <select style={input} value={px.proxy.kernel}
+                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel: e.target.value } })}>
+                  <option value="mihomo">mihomo（Clash.Meta，推荐）</option>
+                  <option value="sing-box">sing-box（尚未实现）</option>
+                </select>
+              </label>
+              <label style={lbl}>监听端口
+                <input style={input} type="number" value={px.proxy.port}
+                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, port: Number(e.target.value) || 17890 } })} />
+              </label>
+              <label style={lbl}>外部代理（内核没起来时回落）
+                <input style={input} value={px.proxy.external_proxy ?? ''} placeholder="http://127.0.0.1:7890"
+                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, external_proxy: e.target.value || null } })} />
+              </label>
+              <label style={lbl}>内核路径（留空自动探测）
+                <input style={input} value={px.proxy.kernel_path ?? ''} placeholder="C:\...\mihomo.exe"
+                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel_path: e.target.value || null } })} />
+              </label>
+              <label style={{ ...lbl, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="checkbox" checked={px.proxy.expose_lan}
+                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, expose_lan: e.target.checked } })} />
+                放开到局域网（让 Emby / CD2 共用；默认只本机）
+              </label>
+              <label style={{ ...lbl, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="checkbox" checked={px.proxy.enabled}
+                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, enabled: e.target.checked } })} />
+                启用内置内核
+              </label>
+            </div>
+          </>
+        )}
+
+        <div style={row}>
+          <button style={btn} onClick={() => saveProxy()}>保存</button>
+          <button style={btn} onClick={() => saveProxy(true)}>保存并启动</button>
+          <button style={btn} onClick={() => saveProxy(false)}>停用</button>
+          <button style={btn} onClick={reloadProxy}>重新拉起</button>
+          <button style={btn} onClick={showPxLog}>看内核日志</button>
+        </div>
+        {pxLog && <pre style={pre}>{pxLog}</pre>}
       </section>
 
       <section style={card}>

@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -23,10 +23,10 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use mdc_core::{
-    config::AppConfig,
+    config::{AppConfig, ProxyConfig},
     db,
     model::OrganizeMode,
-    pipeline, scrape,
+    pipeline, proxy, scrape,
     VERSION,
 };
 
@@ -38,6 +38,9 @@ struct AppState {
     jwt_key: Arc<String>,
     /// 网盘刮削的运行态（单飞令牌 + last_run）。定时器与手动触发共用它。
     strm_runner: Arc<mdc_core::strm::StrmRunner>,
+    /// 内置代理内核。里面持有子进程（`Child` 非 Sync）⇒ 必须 Mutex；
+    /// 启动要花几秒到十几秒，**不要在请求里同步等**，一律 spawn。
+    proxy: Arc<tokio::sync::Mutex<proxy::ProxyManager>>,
 }
 
 // ---------- 鉴权 ----------
@@ -167,6 +170,8 @@ async fn put_config(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     cfg.save().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     *state.cfg.write().await = cfg;
+    // 整体配置里也含 [proxy]，改了就得让内核跟着变，否则 UI 上开关与真实状态不一致
+    sync_proxy(state).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -205,6 +210,83 @@ fn probe_writable(dir: &std::path::Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+// ---------- 内置代理内核 ----------
+
+#[derive(Deserialize)]
+struct ProxyPutReq {
+    proxy: ProxyConfig,
+}
+
+async fn proxy_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cfg = state.cfg.read().await.proxy.clone();
+    let mut m = state.proxy.lock().await;
+    // 内核可能自己崩了：每次问状态都顺手检查一次，别让 UI 一直显示「运行中」
+    m.refresh();
+    Json(serde_json::json!({
+        "enabled": cfg.enabled,
+        "kernel": cfg.kernel,
+        "port": cfg.port,
+        // 把完整配置回给前端：UI 只调这一个接口就能渲染表单并原样提交
+        "proxy": cfg,
+        "phase": m.phase().clone(),
+        // 实际生效的出网代理：内核 / 外部代理 / 直连(None)
+        "effective_proxy": m.effective_proxy(),
+        // 未启用时也报，UI 才能提示「先放一个 mihomo 到这里」
+        "kernel_found": proxy::find_kernel(&cfg).is_ok(),
+    }))
+}
+
+async fn put_proxy(
+    State(state): State<AppState>,
+    Json(req): Json<ProxyPutReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    {
+        let mut cfg = state.cfg.write().await;
+        cfg.proxy = req.proxy;
+        cfg.save()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    sync_proxy(state).await;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn proxy_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
+    sync_proxy(state).await;
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn proxy_log(
+    State(state): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let lines = q
+        .get("lines")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50usize)
+        .min(500);
+    Json(serde_json::json!({ "log": state.proxy.lock().await.log_tail(lines) }))
+}
+
+/// 按当前配置拉起/停掉内核。**启动放到后台**：拉订阅 + 等端口最多十几秒，
+/// 在请求里同步等会把 HTTP 请求拖死。
+async fn sync_proxy(state: AppState) {
+    let cfg = state.cfg.read().await.proxy.clone();
+    if !cfg.enabled {
+        // 走 disable 而不是 stop：要一并同步配置并清掉状态
+        state.proxy.lock().await.disable(cfg);
+        return;
+    }
+    tokio::spawn(async move {
+        let mut m = state.proxy.lock().await;
+        // 传**最新**配置：manager 内部那份可能是启动时抄的旧副本
+        if let Err(e) = m.start(cfg).await {
+            // 起不来不等于不能干活：降级链会自动回落到外部代理/直连，
+            // 但必须让用户在 UI 上看得到原因
+            tracing::warn!(error = %e, "内置代理内核启动失败，已回落");
+        }
+    });
 }
 
 async fn netdisk_state(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -634,14 +716,22 @@ async fn main() -> Result<()> {
         AppConfig::data_dir().join("strm_last_run"),
     ));
 
+    // cfg 会被 move 进 Arc，先把代理配置抄一份出来
+    let proxy_cfg = cfg.proxy.clone();
     let state = AppState {
         cfg: Arc::new(RwLock::new(cfg)),
         pool,
         engine,
         jwt_key,
         strm_runner,
+        proxy: Arc::new(tokio::sync::Mutex::new(proxy::ProxyManager::new(
+            AppConfig::data_dir().join("proxy"),
+            proxy_cfg,
+        ))),
     };
     tokio::spawn(strm_scheduler(state.clone()));
+    // 上次是启用状态的话，启动即拉起内核（后台，不阻塞服务就绪）
+    sync_proxy(state.clone()).await;
 
     let protected = Router::new()
         .route("/api/config", get(get_config).put(put_config))
@@ -656,6 +746,11 @@ async fn main() -> Result<()> {
         .route("/api/strm/run", post(strm_run))
         .route("/api/strm/status", get(strm_status))
         .route("/api/strm/list", get(strm_list))
+        // 内置代理内核（状态/配置/重载/日志，都在鉴权区内）
+        .route("/api/proxy/status", get(proxy_status))
+        .route("/api/proxy/config", put(put_proxy))
+        .route("/api/proxy/reload", post(proxy_reload))
+        .route("/api/proxy/log", get(proxy_log))
         // 多源人工精选
         .route("/api/scrape/candidates", post(scrape_candidates))
         .route("/api/videos/manual", get(list_manual_meta))

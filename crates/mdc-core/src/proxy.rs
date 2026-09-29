@@ -78,7 +78,12 @@ impl ProxyManager {
     }
 
     /// 启动内核。任何一步失败都落到 `Failed { reason }` 并把这个错误抛给调用方。
-    pub async fn start(&mut self) -> Result<()> {
+    ///
+    /// 🔴 配置**必须由调用方传入**：manager 自己那份是启动时的副本，
+    /// 用户在 UI 里改完配置后它不会自动更新（实测：改完 enabled 仍是旧值 ⇒
+    /// 内核永远停在「未启用」，回落也拿不到新的 external_proxy）。
+    pub async fn start(&mut self, cfg: ProxyConfig) -> Result<()> {
+        self.cfg = cfg;
         self.stop();
         if !self.cfg.enabled {
             self.phase = Phase::Disabled;
@@ -154,6 +159,16 @@ impl ProxyManager {
         }
         self.phase = Phase::Running { port };
         Ok(())
+    }
+
+    /// 停用：同步配置 + 停进程 + 清状态。
+    ///
+    /// 不能只调 `stop()` —— 那样 manager 里还是旧配置（回落地址不更新），
+    /// 而且上次的 `Failed{reason}` 会一直留在 UI 上显得还在报错。
+    pub fn disable(&mut self, cfg: ProxyConfig) {
+        self.cfg = cfg;
+        self.stop();
+        self.phase = Phase::Disabled;
     }
 
     /// 停掉内核（幂等）。
@@ -534,7 +549,7 @@ rules:
             std::env::temp_dir().join("mdc-proxy-test3"),
             ProxyConfig::default(),
         );
-        m.start().await.unwrap();
+        m.start(ProxyConfig::default()).await.unwrap();
         assert_eq!(m.phase(), &Phase::Disabled);
     }
 
@@ -544,9 +559,50 @@ rules:
             enabled: true,
             ..Default::default()
         };
-        let mut m = ProxyManager::new(std::env::temp_dir().join("mdc-proxy-test4"), cfg);
-        let e = m.start().await.unwrap_err();
+        let mut m = ProxyManager::new(std::env::temp_dir().join("mdc-proxy-test4"), cfg.clone());
+        let e = m.start(cfg).await.unwrap_err();
         assert!(e.to_string().contains("订阅"));
         assert!(matches!(m.phase(), Phase::Failed { .. }));
+    }
+
+    #[test]
+    fn 停用后要清掉上次的失败原因并同步配置() {
+        let mut m = ProxyManager::new(
+            std::env::temp_dir().join("mdc-proxy-test6"),
+            ProxyConfig {
+                external_proxy: Some("http://127.0.0.1:7890".to_string()),
+                ..Default::default()
+            },
+        );
+        m.phase = Phase::Failed {
+            reason: "找不到内核".into(),
+        };
+        // 停用 + 外部代理清空
+        m.disable(ProxyConfig::default());
+        assert_eq!(m.phase(), &Phase::Disabled, "停用后不该还显示失败");
+        assert_eq!(m.effective_proxy(), None, "回落地址要按新配置来");
+    }
+
+    #[tokio::test]
+    async fn 配置热更新后_start_要用新配置() {
+        // 构造时是「未启用」，start 时传入「启用 + 外部代理」——
+        // 必须按**传入的**这份走，否则 UI 上改了开关永远不生效
+        let mut m = ProxyManager::new(
+            std::env::temp_dir().join("mdc-proxy-test5"),
+            ProxyConfig::default(),
+        );
+        let fresh = ProxyConfig {
+            enabled: true,
+            external_proxy: Some("http://127.0.0.1:7890".to_string()),
+            ..Default::default()
+        };
+        let e = m.start(fresh).await.unwrap_err();
+        assert!(e.to_string().contains("订阅"), "应当走到「缺订阅」而不是停在未启用");
+        assert!(matches!(m.phase(), Phase::Failed { .. }));
+        // 失败也要能回落到**新配置里**的外部代理
+        assert_eq!(
+            m.effective_proxy().as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
     }
 }
