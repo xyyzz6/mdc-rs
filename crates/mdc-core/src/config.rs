@@ -29,8 +29,12 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommonConfig {
-    /// HTTP 代理，如 http://127.0.0.1:7890 或 socks5://...
+    /// HTTP 代理，如 http://127.0.0.1:7890 或 socks5://...，也可是内置内核的地址
     pub proxy: Option<String>,
+    /// **追加**的直连白名单（域名 / IP / CIDR）。
+    /// 内网（192.168.*、10.*、172.16-31.*、*.local、回环）**默认已豁免**，这里只填额外的。
+    /// 理由见 `net.rs`：代理不认识内网地址会直接回 404，且现象是「时好时坏」。
+    pub no_proxy: Vec<String>,
     /// 刮削并发线程数
     pub scrape_thread_count: u32,
     /// 单请求超时（秒）
@@ -43,6 +47,7 @@ impl Default for CommonConfig {
     fn default() -> Self {
         Self {
             proxy: None,
+            no_proxy: Vec::new(),
             scrape_thread_count: 4,
             timeout_secs: 30,
             media_dirs: Vec::new(),

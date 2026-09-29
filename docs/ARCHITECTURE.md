@@ -242,7 +242,8 @@ mdc-rs 只读它暴露出来的挂载目录、按 CD2 直链格式写 `.strm`。
 - **v0.1（当前）**：骨架闭环——扫描/解析/刮削引擎/整理/NFO/WebUI/鉴权/三端构建
   + 网盘刮削（CD2 → `.strm`，增量 + 定时）
   + 番号前缀表与無碼日期式番号
-- **v0.2**：更多刮削源（javdb **需登录、不可用**）/ 多源结果人工精选 UI
+- **v0.2**：**内置代理内核**（mihomo + 订阅）/ **网盘目录源抽象 `DirSource`**（LocalFs + WebDAV，
+  APK 端才有挂载可用）/ 更多刮削源（javdb **需登录、不可用**）
 - **v0.3**：AI 人脸定位裁剪（rustface + seetaface 模型）、水印、预览图
 - **v0.4**：翻译（OpenAI/DeepL）、FlareSolverr、SQLCipher、Emby 联动
 - **v0.5**：移动端后台监控（Android foreground service）、演员库（gfriends）

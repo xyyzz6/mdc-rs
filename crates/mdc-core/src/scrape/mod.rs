@@ -13,7 +13,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 use crate::config::AppConfig;
 use crate::model::VideoMeta;
@@ -27,20 +26,15 @@ pub struct ScrapeCtx {
 
 impl ScrapeCtx {
     pub fn from_config(cfg: &AppConfig) -> Result<Self> {
-        let mut builder = Client::builder()
-            .timeout(Duration::from_secs(cfg.common.timeout_secs.max(5)))
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            )
-            .cookie_store(true);
-        if let Some(proxy) = &cfg.common.proxy {
-            if !proxy.trim().is_empty() {
-                builder = builder.proxy(reqwest::Proxy::all(proxy)?);
-            }
-        }
+        // 出网统一走 net.rs：代理与「内网直连」豁免必须同一处决定
+        // （代理不认识内网地址会直接回 404，douyin-nas 踩过）。
+        let http = crate::net::client(crate::net::HttpOpts {
+            proxy: cfg.common.proxy.as_deref(),
+            no_proxy: &cfg.common.no_proxy,
+            timeout_secs: cfg.common.timeout_secs,
+        })?;
         Ok(Self {
-            http: builder.build()?,
+            http,
             flaresolverr: cfg.scrape.flaresolverr.clone(),
         })
     }

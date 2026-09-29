@@ -14,6 +14,7 @@ pub mod db;
 pub mod image;
 pub mod model;
 pub mod monitor;
+pub mod net;
 pub mod nfo;
 pub mod organize;
 pub mod parser;

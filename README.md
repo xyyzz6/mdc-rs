@@ -33,6 +33,16 @@ cargo run -p mdc-server
 | `MDC_WEB_DIST` | `./web/dist` | 前端静态文件目录 |
 | `MDC_USERNAME` / `MDC_PASSWORD` | — | 两者都设才启用登录鉴权（只覆盖内存，不落盘） |
 
+## 代理
+
+刮削站在国内直连实测 `http_code=000`，必须有出网通道。配置里 `common.proxy`
+填 `http://127.0.0.1:7890` 之类即可，**内网（192.168.\*、10.\*、172.16-31.\*、
+\*.local、回环）默认直连** —— 代理不认识内网地址会直接回 404，而且现象是「时好时坏」，
+极难查。要额外豁免就往 `common.no_proxy` 里加。
+
+下一步是**内置代理内核**（自带 mihomo，用户只填订阅链接），设计见
+[docs/PROXY.md](docs/PROXY.md)。
+
 ## 刮削源现状
 
 两个内置源，**都需要代理**（国内直连实测 `http_code=000`），在 `[common] proxy` 里配
@@ -118,8 +128,14 @@ CI（`.github/workflows/release.yml`）在打 tag 时自动产出三端制品。
 - ✅ NFO 生成（Kodi/Emby 兼容）+ 海报下载裁剪（2:3 中心裁剪）
 - ✅ 目录监控（实时/轮询双模式）
 - ✅ Web UI + JWT 鉴权（每实例随机密钥）
+- ⬜ **内置代理内核**（mihomo + 订阅链接，用户不再另开代理容器）—— 见 `docs/PROXY.md`
+- ⬜ **APK 内置 CloudDrive2 引擎**（手机本地挂 115open，走 WebDAV 读目录）
 - ⬜ AI 人脸定位裁剪 / 水印（v0.3）
 - ⬜ 翻译 / FlareSolverr / Emby 联动 / SQLCipher（v0.4）
+
+> 🔴 APK 端不能沿用「网盘挂在本机绝对路径」的假设 —— 安卓**没有 FUSE 挂载**，
+> 所以网盘目录源会抽象成 `DirSource`（LocalFs / WebDAV 两种实现）。这是 APK 端
+> 支持网盘的前提，也是 `docs/PROXY.md` 里最重要的一条架构影响。
 
 ## 网盘刮削（115 等）
 
