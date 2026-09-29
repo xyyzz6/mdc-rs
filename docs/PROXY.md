@@ -135,7 +135,8 @@ douyin-nas 的 APK 里已经内置了 CD2 引擎并跑通了 115，直接照抄�
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | **P0 出网层** | `net.rs`：代理 + 内网 NO_PROXY 豁免 + 统一 `Client` 构造 | ✅ 已完成（8 条测试，含变异验证） |
-| **P1 内核托管** | 订阅拉取 / 进程托管 / 端口探测 / 降级链 / API / UI | ⬜ 下一步 |
+| **P1a 内核托管核心** | `proxy.rs`：订阅拉取 / 配置改写 / 进程启停 / 端口探测 / 降级链 | ✅ 已完成（13 条测试，含变异验证） |
+| **P1b** | server API（`/api/proxy/*`）+ 前端代理区块 | ⬜ 下一步 |
 | **P2 目录源抽象 + APK CD2** | `DirSource` trait（LocalFs + WebDav）、Android 侧 spawn 引擎与管理页 | ⬜ |
 | **P3 三端构建补齐** | CI 补 Android NDK 与内核下载；本机无 Docker/NDK，产物需在 CI 或 NAS 上验 | ⬜ |
 

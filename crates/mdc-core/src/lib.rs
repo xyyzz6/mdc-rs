@@ -19,6 +19,7 @@ pub mod nfo;
 pub mod organize;
 pub mod parser;
 pub mod pipeline;
+pub mod proxy;
 pub mod scrape;
 pub mod strm;
 

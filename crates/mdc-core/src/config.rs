@@ -24,6 +24,45 @@ pub struct AppConfig {
     pub netdisk: Cd2Config,
     /// `.strm` 输出
     pub strm: StrmConfig,
+    /// 内置代理内核（详见 docs/PROXY.md）
+    pub proxy: ProxyConfig,
+}
+
+/// 内置代理内核。
+///
+/// 🔴 内核二进制**不进仓库**（体积 + 各自授权），找不到就是 `KernelMissing`，
+/// 此时功能禁用并**如实报错**，绝不静默退化成直连。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// 是否启用内置内核
+    pub enabled: bool,
+    /// `mihomo` | `sing-box`（当前只实现了 mihomo）
+    pub kernel: String,
+    /// 订阅链接。**只存用户自己填的**，不预置任何节点/订阅。
+    pub subscribe_url: Option<String>,
+    /// 内核二进制路径；留空时按 kernel_path → 环境变量 → exe 同目录 → PATH 顺序探测
+    pub kernel_path: Option<String>,
+    /// 内核监听端口（默认 17890，避开常见的 7890，因为本机可能已有 Clash）
+    pub port: u16,
+    /// 是否把监听放开到局域网（给 Emby / CD2 共用）；默认只本机
+    pub expose_lan: bool,
+    /// 兜底代理：内核没起来时用它，也是**第一次拉订阅**的引导通道
+    pub external_proxy: Option<String>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kernel: "mihomo".to_string(),
+            subscribe_url: None,
+            kernel_path: None,
+            port: crate::proxy::DEFAULT_PORT,
+            expose_lan: false,
+            external_proxy: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
