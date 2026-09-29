@@ -58,6 +58,11 @@ pub async fn create_tasks_for_dir(pool: &SqlitePool, dir: &Path) -> Result<usize
 }
 
 /// 处理单条任务：解析 → 刮削 → 整理 → NFO → 落库。
+///
+/// `strm_cloud` 是**网盘内路径**（`/115/电影/x.mp4`），只在 `.strm` 模式下用：
+/// 给了就直接用它拼直链，不给才从 `source_path` 反推。
+/// 为什么必须由调用方给：安卓端网盘**没有本机路径**（无 FUSE），
+/// 反推这一步在 APK 上根本无从下手（见 `source.rs` 头注释）。
 pub async fn process_task(
     pool: &SqlitePool,
     engine: &Engine,
@@ -66,6 +71,7 @@ pub async fn process_task(
     task: &TaskRow,
     mode: OrganizeMode,
     library_root: Option<&Path>,
+    strm_cloud: Option<&str>,
 ) -> Result<ProcessOutcome> {
     // 配置校验放最前面：配错了就别去刮削了（白打网络请求，还会让报错延迟到最后）
     if mode == OrganizeMode::Strm && library_root.is_none() {
@@ -174,7 +180,10 @@ pub async fn process_task(
     match mode {
         // 网盘：视频一个字节都不搬，只写一个几十字节的指针文件
         OrganizeMode::Strm => {
-            let url = crate::cd2::build_url(&task.source_path, &cfg.netdisk)?;
+            let url = match strm_cloud {
+                Some(cp) => crate::cd2::build_url_from_cloud(cp, &cfg.netdisk)?,
+                None => crate::cd2::build_url(&task.source_path, &cfg.netdisk)?,
+            };
             crate::strm::write_strm(&dest_file, &url, cfg.strm.bom)?;
         }
         _ => organize::apply(mode, &source, &dest_file)?,
@@ -250,7 +259,9 @@ pub async fn process_pending(
         .collect::<Vec<_>>();
     let n = tasks.len();
     for task in tasks {
-        if let Err(e) = process_task(pool, engine, ctx, cfg, &task, mode, library_root).await {
+        if let Err(e) =
+            process_task(pool, engine, ctx, cfg, &task, mode, library_root, None).await
+        {
             tracing::error!(task_id = task.id, error = %e, "任务处理失败");
         }
     }
@@ -279,8 +290,13 @@ pub struct StrmRunStats {
 /// 两阶段（douyin-nas §55 的做法）：先把所有目录扫完拿到 total，
 /// 再逐个处理 —— 否则进度条没有分母。
 ///
+/// 目录从哪来由 [`crate::source::DirSource`] 决定：桌面/Docker 是本地挂载，
+/// 安卓（无 FUSE）只能走 CD2 的 WebDAV。上层不再碰 `Path::is_dir()`。
+///
 /// 增量语义：manifest 里签名（= `.strm` 内容）没变、且落点文件还在 → **整条跳过**。
-/// 签名只跟源路径有关，所以跳过时**连刮削都不做** —— 零网盘流量、零刮削请求。
+/// 签名只跟网盘路径有关，所以跳过时**连刮削都不做** —— 零网盘流量、零刮削请求。
+/// 🔴 manifest 的 key 用**网盘内路径**而不是本机绝对路径：
+/// 同一个库从 local 切到 webdav（或换挂载点）时增量依然命中，不必全量重刷。
 pub async fn run_strm_jobs(
     runner: &crate::strm::StrmRunner,
     pool: &SqlitePool,
@@ -294,9 +310,8 @@ pub async fn run_strm_jobs(
     if cfg.strm.jobs.is_empty() {
         return Err(anyhow!("还没有配置要监控的网盘目录（strm.jobs 为空）"));
     }
-    if cfg.netdisk.mount_root.trim().is_empty() {
-        return Err(anyhow!("还没有配置 CD2 挂载根（netdisk.mount_root）"));
-    }
+    // 目录源自身做校验：local 必须有挂载根，webdav 必须有 base
+    let source = cfg.dir_source()?;
 
     // 单飞令牌：丢掉即释放（含 panic 展开路径）。定时器和手动触发共用它，
     // 所以两者不会同时打网盘 —— 这也是「反复重扫触发风控」的防线之一。
@@ -308,25 +323,26 @@ pub async fn run_strm_jobs(
     let mut manifest = crate::strm::Manifest::load(&manifest_path);
 
     // ── 阶段一：扫描 ──────────────────────────────────────────
-    let mut sources: Vec<PathBuf> = Vec::new();
+    let mut sources: Vec<crate::source::DirEntry> = Vec::new();
     for job in &cfg.strm.jobs {
         let job = job.trim();
         if job.is_empty() {
             continue;
         }
-        let p = Path::new(job);
-        if !p.is_dir() {
-            tracing::warn!(dir = job, "网盘监控目录不存在（挂载没起来？），跳过");
+        if !source.exists_dir(job).await? {
+            tracing::warn!(dir = job, kind = %source.kind(), "网盘监控目录不存在（挂载没起来？），跳过");
             continue;
         }
-        sources.extend(crate::strm::scan_source_dir(
-            p,
-            cfg.strm.recursive,
-            cfg.strm.max_depth,
-        ));
+        match source.list(job, cfg.strm.recursive, cfg.strm.max_depth).await {
+            Ok(v) => sources.extend(v),
+            Err(e) => {
+                // 单个 job 列不出来只跳过这一个 —— 一轮里别的目录照样要跑完
+                tracing::warn!(dir = job, error = %e, "列出网盘目录失败，跳过");
+            }
+        }
     }
-    sources.sort();
-    sources.dedup();
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+    sources.dedup_by(|a, b| a.path == b.path);
 
     let mut stats = StrmRunStats {
         total: sources.len(),
@@ -335,8 +351,8 @@ pub async fn run_strm_jobs(
     };
 
     // ── 阶段二：逐条处理 ──────────────────────────────────────
-    for src in &sources {
-        let src_str = src.to_string_lossy().to_string();
+    for entry in &sources {
+        let src_str = entry.path.clone();
         let parsed = parse_filename(&src_str);
         if parsed.number.is_none() {
             stats.failed += 1;
@@ -346,8 +362,18 @@ pub async fn run_strm_jobs(
             continue;
         }
 
-        // 直链算不出来（不在挂载根下）就别建任务 —— 建了也是白失败
-        let url = match crate::cd2::build_url(&src_str, &cfg.netdisk) {
+        // 网盘路径算不出来（不在挂载根下 / 服务端没给）就别建任务 —— 建了也是白失败
+        let cloud = match source.cloud_path(&src_str) {
+            Ok(c) => c,
+            Err(e) => {
+                stats.failed += 1;
+                if stats.errors.len() < 20 {
+                    stats.errors.push(format!("{e}"));
+                }
+                continue;
+            }
+        };
+        let url = match crate::cd2::build_url_from_cloud(&cloud, &cfg.netdisk) {
             Ok(u) => u,
             Err(e) => {
                 stats.failed += 1;
@@ -358,7 +384,7 @@ pub async fn run_strm_jobs(
             }
         };
 
-        if !force && manifest.is_fresh(&src_str, &url) {
+        if !force && manifest.is_fresh(&cloud, &url) {
             stats.skipped += 1;
             continue;
         }
@@ -370,11 +396,21 @@ pub async fn run_strm_jobs(
             continue;
         };
 
-        match process_task(pool, engine, ctx, cfg, &task, OrganizeMode::Strm, Some(&out_root)).await
+        match process_task(
+            pool,
+            engine,
+            ctx,
+            cfg,
+            &task,
+            OrganizeMode::Strm,
+            Some(&out_root),
+            Some(&cloud),
+        )
+        .await
         {
             Ok(outcome) => {
                 if let Some(dest) = &outcome.dest {
-                    manifest.put(&src_str, &dest.to_string_lossy(), &url);
+                    manifest.put(&cloud, &dest.to_string_lossy(), &url);
                     stats.added += 1;
                 } else {
                     stats.failed += 1;

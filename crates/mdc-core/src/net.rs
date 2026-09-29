@@ -44,27 +44,61 @@ pub struct HttpOpts<'a> {
 
 /// 按配置构造 HTTP 客户端：代理 + 内网豁免 + cookie + 超时。
 ///
-/// 没配代理（或配了空串）时就是一台普通客户端 —— 行为与以前完全一致，
-/// 所以本机/内网部署的用户不受影响。
+/// 🔴 豁免列表**无条件挂上**，哪怕用户没配代理。原因（实测踩到）：
+/// reqwest 会**自动读系统代理**（`HTTP_PROXY` / `HTTPS_PROXY` 环境变量）。
+/// 只在「用户显式配了代理」时才设豁免是不够的 —— 那样在「配置里没填代理、
+/// 但系统环境里有代理」的机器上，访问 CD2 / Emby / NAS 的请求照样被代理吃掉，
+/// 现象是**时好时坏**（代理恰好没跑时一切正常），极难查 —— 就是 douyin-nas 踩的那个坑。
+///
+/// 所以这里统一：有显式代理就用它，没有就用系统代理（`Proxy::system()`），
+/// **两种情况下都套同一份 NO_PROXY**；用户填 `*` 时则连系统代理一起关掉。
 pub fn client(opts: HttpOpts<'_>) -> Result<Client> {
-    let mut builder = Client::builder()
+    let builder = Client::builder()
         .timeout(Duration::from_secs(opts.timeout_secs.max(5)))
         .user_agent(UA)
         .cookie_store(true);
 
-    if let Some(raw) = opts.proxy {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            let list = build_no_proxy(opts.no_proxy);
-            // `*` 表示「全都别走代理」——此时根本不挂代理，比挂了再豁免更彻底。
-            if list != "*" {
-                // `no_proxy` 收 Option：解析不出来时宁可全走代理，也别静默变成直连
-                let proxy = Proxy::all(raw)?.no_proxy(NoProxy::from_string(&list));
-                builder = builder.proxy(proxy);
+    // 用户追加项 + 环境里的 NO_PROXY 一起算
+    let mut extra: Vec<String> = opts.no_proxy.to_vec();
+    if let Ok(v) = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")) {
+        extra.extend(v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    }
+    let list = build_no_proxy(&extra);
+
+    // `*` = 「全都别走代理」：此时根本不挂代理（连系统代理一起关 —— `no_proxy()` 就这语义），
+    // 比挂上再豁免更彻底。
+    if list == "*" {
+        return Ok(builder.no_proxy().build()?);
+    }
+
+    let raw = match opts.proxy.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(p) => Some(p.to_string()),
+        None => system_proxy(),
+    };
+    let Some(raw) = raw else {
+        // 配置与环境都没有代理 —— 直连
+        return Ok(builder.no_proxy().build()?);
+    };
+    // `no_proxy` 收 Option：解析不出来时宁可全走代理，也别静默变成直连
+    Ok(builder.proxy(Proxy::all(raw)?.no_proxy(NoProxy::from_string(&list))).build()?)
+}
+
+/// 读系统环境里的代理（`HTTPS_PROXY` / `HTTP_PROXY`，大小写都认）。
+///
+/// 🔴 为什么自己读而不用 reqwest 的自动系统代理：自动模式下我们**没法**给它挂
+/// NO_PROXY（reqwest 的 `Proxy::system()` 不对外），于是「环境里有代理、
+/// 配置里没填」的机器上，访问 CD2 / Emby / NAS 的请求会被代理直接吃掉 ——
+/// 现象是时好时坏的 404（douyin-nas 踩过）。读出来显式挂上，就能套用同一份豁免。
+fn system_proxy() -> Option<String> {
+    for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        if let Ok(v) = std::env::var(k) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
             }
         }
     }
-    Ok(builder.build()?)
+    None
 }
 
 /// 拼出交给 reqwest 的 NO_PROXY 串（默认内网 + 用户追加项）。
@@ -265,5 +299,73 @@ mod tests {
             timeout_secs: 5,
         });
         assert!(c.is_err());
+    }
+
+    /// 起一个只在本机可达的小服务（**先读请求再应答**，否则 hyper 会报 UnexpectedMessage）。
+    fn spawn_ok_server() -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for s in listener.incoming() {
+                let Ok(mut s) = s else { continue };
+                let mut buf = [0u8; 1024];
+                // 读完请求头再回 —— 不读就写会让 hyper 这边解析错乱
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+                let _ = s.flush();
+            }
+        });
+        port
+    }
+
+    /// 🔴 回环/内网**必须绕过代理**，哪怕这个代理是死的（走过去必然失败）。
+    ///
+    /// 这条是对「豁免真的生效了」的**行为级**证明：上面的测试只验证字符串拼得对，
+    /// 证明不了 reqwest 真的没把请求丢给代理。真实场景里代理吃了内网请求的
+    /// 表现是「时好时坏 404」（douyin-nas 踩过），所以这里必须钉死。
+    #[tokio::test]
+    async fn 回环请求绕过死代理直连可达() {
+        let port = spawn_ok_server();
+
+        // 代理故意指向没人监听的端口 —— 回环只要走了代理就必然失败
+        let c = client(HttpOpts {
+            proxy: Some("http://127.0.0.1:1"),
+            no_proxy: &[],
+            timeout_secs: 5,
+        })
+        .unwrap();
+        let r = c
+            .get(format!("http://127.0.0.1:{port}/x"))
+            .send()
+            .await
+            .expect("🔴 回环请求被代理吃掉了（豁免没生效）");
+        assert_eq!(r.text().await.unwrap(), "ok");
+    }
+
+    /// 没配代理时也要挂豁免：reqwest 会**自动读系统代理**（`HTTP_PROXY` 环境变量）。
+    /// 这里用一个死代理当「系统代理」来验证豁免在那种情况下同样生效。
+    #[tokio::test]
+    async fn 没配代理时豁免也要生效() {
+        let port = spawn_ok_server();
+
+        // ⚠️ 环境变量是进程级的，测完必须还原（cargo 会并发跑测试）
+        let key = "HTTP_PROXY";
+        let old = std::env::var(key).ok();
+        std::env::set_var(key, "http://127.0.0.1:1");
+        let c = client(HttpOpts {
+            proxy: None,
+            no_proxy: &[],
+            timeout_secs: 5,
+        })
+        .unwrap();
+        let res = c.get(format!("http://127.0.0.1:{port}/x")).send().await;
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        res.expect("🔴 系统代理把回环请求吃了（豁免没挂上）");
     }
 }

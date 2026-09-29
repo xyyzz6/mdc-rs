@@ -115,7 +115,16 @@ fn norm_slashes(p: &str) -> String {
 /// 返回 `Err` 说明文件不在 `mount_root` 下 —— 这时**必须报错而不是硬拼**，
 /// 否则会生成一个看起来正常、点开 404 的 .strm。
 pub fn cloud_path_of(abs_path: &str, cfg: &Cd2Config) -> Result<String> {
-    let root = norm_slashes(&cfg.mount_root);
+    cloud_path_from_local(abs_path, &cfg.mount_root, &cfg.path_prefix)
+}
+
+/// 同上，但挂载根与前缀**由调用方显式给出**。
+///
+/// 为什么要拆出这一条：`source::LocalFs` 手上只有挂载根/前缀两个字符串，
+/// 没有完整的 `Cd2Config`；而拼错一次的代价是「.strm 看着正常、点开 404」，
+/// 所以宁可多一个入口也别让调用方自己拼字符串。
+pub fn cloud_path_from_local(abs_path: &str, mount_root: &str, path_prefix: &str) -> Result<String> {
+    let root = norm_slashes(mount_root);
     if root.is_empty() {
         return Err(anyhow!("没有配置 CD2 挂载根（netdisk.mount_root），无法算出网盘内路径"));
     }
@@ -138,25 +147,36 @@ pub fn cloud_path_of(abs_path: &str, cfg: &Cd2Config) -> Result<String> {
         format!("/{rest}")
     };
 
-    let prefix = cfg.path_prefix.trim().trim_matches('/');
+    let prefix = path_prefix.trim().trim_matches('/');
     if !prefix.is_empty() {
         cp = format!("/{prefix}{cp}");
     }
     Ok(cp)
 }
 
-/// 按模板拼出 CD2 直链。
+/// 按模板拼出 CD2 直链（本机绝对路径入口）。
 pub fn build_url(abs_path: &str, cfg: &Cd2Config) -> Result<String> {
-    let cloud_path = cloud_path_of(abs_path, cfg)?;
+    build_url_from_cloud(&cloud_path_of(abs_path, cfg)?, cfg)
+}
+
+/// 按模板拼出 CD2 直链（**网盘内路径**入口）。
+///
+/// 🔴 与 `build_url` 的区别：这条**不再套 `path_prefix`** —— 传进来的
+/// `cloud_path` 已经是最终网盘路径了（前缀由目录源自己负责加）。
+/// 两处都加前缀会得到 `/115open/115open/...` 这种必然 404 的链接。
+pub fn build_url_from_cloud(cloud_path: &str, cfg: &Cd2Config) -> Result<String> {
+    if cloud_path.trim().is_empty() {
+        return Err(anyhow!("网盘内路径为空，拼不出直链"));
+    }
     let internal = cfg
         .internal_addr
         .replace("{host}", &cfg.host)
         .replace("{port}", &cfg.port.to_string());
 
     let encoded = if cfg.urlencode_path {
-        quote_path_with_safe(&cloud_path, &cfg.encode_safe_chars)
+        quote_path_with_safe(cloud_path, &cfg.encode_safe_chars)
     } else {
-        cloud_path.clone()
+        cloud_path.to_string()
     };
 
     let template = cfg.url_template.trim();
@@ -271,5 +291,25 @@ mod tests {
             cloud_path_of("/mnt/clouddrive/电影/x.mp4", &cfg).unwrap(),
             "/115open/电影/x.mp4"
         );
+    }
+
+    /// 🔴 `build_url_from_cloud` 拿到的已经是**最终**网盘路径，绝不能再套一次前缀 ——
+    /// 否则目录源加一遍、这里再加一遍，`/115open/115open/...` 必然 404。
+    #[test]
+    fn build_url_from_cloud_does_not_reapply_prefix() {
+        let mut cfg = cfg_with_root("/mnt/clouddrive");
+        cfg.path_prefix = "/115open".into();
+        // 与 build_url（走挂载根那条路）必须**逐字节一致**
+        let from_abs = build_url("/mnt/clouddrive/电影/x.mp4", &cfg).unwrap();
+        let from_cloud = build_url_from_cloud("/115open/电影/x.mp4", &cfg).unwrap();
+        assert_eq!(from_abs, from_cloud);
+        assert!(from_cloud.contains("%2F115open%2F"));
+        assert!(!from_cloud.contains("115open%2F115open"));
+    }
+
+    #[test]
+    fn empty_cloud_path_is_error() {
+        let cfg = cfg_with_root("/mnt/clouddrive");
+        assert!(build_url_from_cloud("", &cfg).is_err());
     }
 }

@@ -294,7 +294,8 @@ fn walk(dir: &Path, depth: u32, recursive: bool, max_depth: u32, out: &mut Vec<P
         let name = entry.file_name();
         let name = name.to_string_lossy();
         // 隐藏目录 / 群晖缩略图目录：扫进去纯属浪费请求，还可能触发风控
-        if name.starts_with('.') || name == "@eaDir" || name == "#recycle" {
+        // （名单只有一份，在 `source::skip_name`，两个目录源共用）
+        if crate::source::skip_name(&name) {
             continue;
         }
         if p.is_dir() {

@@ -508,6 +508,7 @@ fn strm_without_out_root_errors() {
             &task,
             mdc_core::model::OrganizeMode::Strm,
             None,
+            None,
         )
         .await
     });
@@ -526,3 +527,193 @@ fn windows_separators_ok() {
     assert!(url.contains("%2F%E7%94%B5%E5%BD%B1%2F"), "实际：{url}");
     let _ = strm::safe_filename_bytes("ABP-123 テスト", 200);
 }
+
+// ──────────────────────────────────────────────────────────────
+// WebDAV 源：安卓端（无 FUSE，网盘不可能挂成本机目录）的唯一路径。
+// 这一组就是「APK 上刮削 115」的离线替身。
+// ──────────────────────────────────────────────────────────────
+
+/// 最小 PROPFIND 服务：按「请求路径 → 207 响应体」应答，**不联网**。
+fn spawn_fake_dav(routes: std::collections::HashMap<String, String>) -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match s.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            let low = l.to_ascii_lowercase();
+                            low.strip_prefix("content-length:")
+                                .map(|v| v.trim().to_string())
+                        })
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if rest.len() >= len {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let head = text.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(&text);
+            let first = head.lines().next().unwrap_or("").to_string();
+            let url_path = first.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let empty = "<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\"></D:multistatus>";
+            let body = routes.get(&url_path).cloned().unwrap_or_else(|| empty.to_string());
+            let resp = format!(
+                "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = s.write_all(resp.as_bytes());
+            let _ = s.flush();
+        }
+    });
+    port
+}
+
+/// 造一个 207 响应：`path` 是目录自身（带尾斜杠），`children` 是它的条目。
+fn dav_resp(path: &str, children: &[(&str, bool)]) -> String {
+    let mut s = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+    s.push_str("<D:multistatus xmlns:D=\"DAV:\">");
+    s.push_str(&format!(
+        "<D:response><D:href>{path}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+    ));
+    for (name, is_dir) in children {
+        let rt = if *is_dir { "<D:collection/>" } else { "" };
+        s.push_str(&format!(
+            "<D:response><D:href>{path}{name}</D:href><D:propstat><D:prop><D:displayname>{name}</D:displayname><D:resourcetype>{rt}</D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+        ));
+    }
+    s.push_str("</D:multistatus>");
+    s
+}
+
+/// 🔴 目录源 = WebDAV 时，整条管线（扫 → 刮 → 写 .strm → 记 manifest）必须照常跑通，
+/// 而且**完全不碰本机挂载根** —— `netdisk.mount_root` 故意留空。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webdav_source_end_to_end() {
+    let _guard = ENV_LOCK.lock().await;
+    let port = spawn_mock_provider();
+    let fx = Fixture::new("dav");
+
+    let mut routes = std::collections::HashMap::new();
+    // @eaDir 里塞一个视频：证明「元数据目录必须跳过」这条不是摆设。
+    // 注意 key 是**请求行里的 URL**（客户端会把 `@` 编成 `%40`），href 那边用原文。
+    routes.insert(
+        "/dav/115/%E7%9C%8B%E5%89%A7/%40eaDir/".to_string(),
+        dav_resp("/dav/115/%E7%9C%8B%E5%89%A7/@eaDir/", &[("junk.mp4", false)]),
+    );
+    routes.insert(
+        "/dav/115/%E7%9C%8B%E5%89%A7/".to_string(),
+        dav_resp(
+            "/dav/115/%E7%9C%8B%E5%89%A7/",
+            &[
+                ("MIDV-567%201080p.mp4", false),
+                ("SSIS-424.mp4", false),
+                ("readme.txt", false),
+                ("@eaDir/", true), // 元数据目录：必须被跳过
+            ],
+        ),
+    );
+    let dav_port = spawn_fake_dav(routes);
+
+    std::env::set_var("MDC_CONFIG_PATH", &fx.data_dir);
+    let mut cfg = AppConfig::default();
+    cfg.common.timeout_secs = 5;
+    cfg.scrape.disabled = vec!["javbus".into(), "fc2".into()];
+    cfg.netdisk = Cd2Config {
+        host: "192.168.1.15".into(),
+        port: 19798,
+        // 🔴 故意**不配挂载根**：webdav 源不需要它（安卓上根本不存在本机挂载）
+        mount_root: String::new(),
+        ..Default::default()
+    };
+    cfg.source = mdc_core::source::SourceConfig {
+        kind: "webdav".into(),
+        base: format!("http://127.0.0.1:{dav_port}/dav"),
+        ..Default::default()
+    };
+    cfg.strm = StrmConfig {
+        root: fx.out_root.to_string_lossy().to_string(),
+        jobs: vec!["/115/看剧".into()],
+        recursive: true,
+        ..Default::default()
+    };
+    cfg.save().unwrap();
+
+    std::fs::create_dir_all(AppConfig::providers_dir()).unwrap();
+    std::fs::write(AppConfig::providers_dir().join("local.yaml"), provider_yaml(port)).unwrap();
+
+    let cfg = AppConfig::load().unwrap();
+    assert_eq!(cfg.source.kind().unwrap(), mdc_core::source::SourceKind::WebDav);
+    let engine = scrape::Engine::load(&cfg);
+    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let pool = db::init_pool(&fx.data_dir.join("mdc.db")).await.unwrap();
+    let runner = StrmRunner::new(fx.data_dir.join("strm_last_run"));
+
+    let s = pipeline::run_strm_jobs(&runner, &pool, &engine, &ctx, &cfg, false)
+        .await
+        .expect("webdav 源这一轮不该失败");
+    assert_eq!(s.total, 2, "txt 与 @eaDir 都不该算进来：{:?}", s.errors);
+    assert_eq!(s.added, 2, "应写出 2 个 strm：{:?}", s.errors);
+    assert_eq!(s.failed, 0);
+
+    // 直链必须按**网盘内路径**拼出来（与本地挂载那条路逐字节一致）
+    let want = "http://192.168.1.15:19798/static/http/localhost:19798/False/\
+                %2F115%2F%E7%9C%8B%E5%89%A7%2FMIDV-567%201080p.mp4";
+    let strm1 = fx
+        .out_root
+        .join("三上悠亜/MIDV-567 テスト/MIDV-567 テスト.strm");
+    assert!(strm1.exists(), "没写出 strm：{}", strm1.display());
+    assert_eq!(
+        std::fs::read(&strm1).unwrap(),
+        format!("\u{FEFF}{want}\n").as_bytes(),
+        "webdav 源拼出的直链不对"
+    );
+
+    // 🔴 manifest 的 key 必须是**网盘内路径**：换挂载点 / 换目录源后增量依然命中
+    let mf = std::fs::read_to_string(cfg.strm_manifest_path()).unwrap();
+    assert!(
+        mf.contains("\"/115/看剧/MIDV-567 1080p.mp4\""),
+        "manifest key 应为网盘内路径，实际：{mf}"
+    );
+
+    // 第二轮：manifest 命中，一个都不该重写
+    let s2 = pipeline::run_strm_jobs(&runner, &pool, &engine, &ctx, &cfg, false)
+        .await
+        .expect("第二轮失败");
+    assert_eq!(s2.added, 0, "第二轮不该重写：{:?}", s2.errors);
+    assert_eq!(s2.skipped, 2);
+
+    // ── 换目录源：webdav → local（同一份库、同样的网盘内路径）─────
+    // 🔴 增量必须**照样命中**：manifest 的 key 是网盘内路径，不是本机绝对路径。
+    // 换成绝对路径做 key 时，换挂载点 / 换目录源就会全量重刷一遍（网盘流量翻倍）。
+    write_video(&fx.mount_root.join("看剧/MIDV-567 1080p.mp4"));
+    write_video(&fx.mount_root.join("看剧/SSIS-424.mp4"));
+    let mut local = cfg.clone();
+    local.netdisk.mount_root = fx.root.join("mount").to_string_lossy().to_string();
+    local.source = mdc_core::source::SourceConfig::default();
+    local.strm.jobs = vec![fx.mount_root.join("看剧").to_string_lossy().to_string()];
+    local.save().unwrap();
+    let local = AppConfig::load().unwrap();
+
+    let s3 = pipeline::run_strm_jobs(&runner, &pool, &engine, &ctx, &local, false)
+        .await
+        .expect("切回本地源后不该失败");
+    assert_eq!(s3.total, 2, "本地源也该扫到 2 个：{:?}", s3.errors);
+    assert_eq!(s3.added, 0, "🔴 换源后不该全量重写：{:?}", s3.errors);
+    assert_eq!(s3.skipped, 2, "换源后增量应仍命中");
+}
+

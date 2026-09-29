@@ -127,6 +127,7 @@ async fn manual_pick_wins_and_skips_scraping() {
         &task,
         OrganizeMode::Strm,
         Some(Path::new(&fx.out_root)),
+        None,
     )
     .await
     .unwrap();
@@ -163,6 +164,7 @@ async fn manual_pick_wins_and_skips_scraping() {
         &task,
         OrganizeMode::Strm,
         Some(Path::new(&fx.out_root)),
+        None,
     )
     .await
     .unwrap();
@@ -202,6 +204,7 @@ async fn manual_pick_wins_and_skips_scraping() {
         &task,
         OrganizeMode::Strm,
         Some(Path::new(&fx.out_root)),
+        None,
     )
     .await
     .unwrap();

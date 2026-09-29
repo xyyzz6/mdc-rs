@@ -133,9 +133,11 @@ CI（`.github/workflows/release.yml`）在打 tag 时自动产出三端制品。
 - ⬜ AI 人脸定位裁剪 / 水印（v0.3）
 - ⬜ 翻译 / FlareSolverr / Emby 联动 / SQLCipher（v0.4）
 
-> 🔴 APK 端不能沿用「网盘挂在本机绝对路径」的假设 —— 安卓**没有 FUSE 挂载**，
-> 所以网盘目录源会抽象成 `DirSource`（LocalFs / WebDAV 两种实现）。这是 APK 端
-> 支持网盘的前提，也是 `docs/PROXY.md` 里最重要的一条架构影响。
+> 🔴 APK 端不能沿用「网盘挂在本机绝对路径」的假设 —— 安卓**没有 FUSE 挂载**。
+> 网盘目录源已抽象成 `DirSource`（`source.rs`）：本地挂载（LocalFs）与 CD2 WebDAV
+>（`/dav`，安卓唯一可行路径）两种实现，刮削与 `.strm` 生成只认这个 trait。
+> 同一份库在两种源之间切换，增量清单照样命中（manifest 的 key 是**网盘内路径**）。
+> UI 上有「目录源」区块与「试连」按钮，能立刻看到网盘路径与直链样例。
 
 ## 网盘刮削（115 等）
 

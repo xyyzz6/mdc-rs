@@ -21,6 +21,7 @@ pub mod parser;
 pub mod pipeline;
 pub mod proxy;
 pub mod scrape;
+pub mod source;
 pub mod strm;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

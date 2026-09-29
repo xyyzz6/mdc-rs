@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cd2::Cd2Config;
+use crate::source::SourceConfig;
 use crate::strm::StrmConfig;
 
 /// 全局配置。TOML 持久化到 `<数据目录>/config.toml`。
@@ -26,6 +27,8 @@ pub struct AppConfig {
     pub strm: StrmConfig,
     /// 内置代理内核（详见 docs/PROXY.md）
     pub proxy: ProxyConfig,
+    /// 目录源：网盘是挂成本地目录（local）还是走 WebDAV（webdav，安卓唯一可行）
+    pub source: SourceConfig,
 }
 
 /// 内置代理内核。
@@ -228,6 +231,19 @@ impl AppConfig {
             Some(p) if !p.is_empty() => PathBuf::from(p),
             _ => Self::data_dir().join("strm_manifest.json"),
         }
+    }
+
+    /// 造目录源（扫网盘目录用）。
+    ///
+    /// 代理参数一并传进去：WebDAV 地址一般是局域网，`net.rs` 的默认规则会判成直连；
+    /// 万一用户把 CD2 放在远端，这里也能走代理 —— 但**绝不能**反过来让内网请求被代理吃掉。
+    pub fn dir_source(&self) -> Result<std::sync::Arc<dyn crate::source::DirSource>> {
+        crate::source::build(
+            &self.source,
+            &self.netdisk,
+            self.common.proxy.as_deref(),
+            &self.common.no_proxy,
+        )
     }
 }
 

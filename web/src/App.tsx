@@ -24,6 +24,18 @@ interface NetdiskState {
   mount_ok: boolean;
   out_writable: boolean;
   jobs: { dir: string; exists: boolean }[];
+  source: { kind: string; base: string; user: string | null; password: string | null; path_prefix: string; timeout_secs: number };
+  source_kind: string | null;
+  source_root: string | null;
+  source_ok: boolean;
+}
+
+interface SourceProbe {
+  kind: string;
+  root: string;
+  dir: string;
+  total: number;
+  sample: { path: string; name: string; size: number | null; cloud_path: string | null; url: string | null }[];
 }
 
 interface StrmStatus {
@@ -128,6 +140,16 @@ function App() {
   const [stats, setStats] = useState<StrmStats | null>(null);
   const [scan, setScan] = useState<StrmScan | null>(null);
 
+  // 目录源：网盘是挂成本机目录（local）还是走 WebDAV（webdav —— 安卓唯一可行）
+  const [srcKind, setSrcKind] = useState('local');
+  const [srcBase, setSrcBase] = useState('http://127.0.0.1:19798/dav');
+  const [srcUser, setSrcUser] = useState('');
+  const [srcPass, setSrcPass] = useState('');
+  const [srcPrefix, setSrcPrefix] = useState('');
+  const [srcTimeout, setSrcTimeout] = useState('15');
+  const [probe, setProbe] = useState<SourceProbe | null>(null);
+  const [probeMsg, setProbeMsg] = useState('');
+
   const [px, setPx] = useState<ProxyStatus | null>(null);
   const [pxLog, setPxLog] = useState('');
 
@@ -183,8 +205,21 @@ function App() {
         setStrmRoot(s.strm.root);
         setJobsText(s.strm.jobs.join('\n'));
         setIntervalH(String(s.strm.interval_hours));
+        setSrcKind(s.source.kind || 'local');
+        setSrcBase(s.source.base || 'http://127.0.0.1:19798/dav');
+        setSrcUser(s.source.user || '');
+        setSrcPass(s.source.password || '');
+        setSrcPrefix(s.source.path_prefix || '');
+        setSrcTimeout(String(s.source.timeout_secs || 15));
       })
       .catch(() => {});
+
+  const probeSource = () => {
+    setProbeMsg('正在试连…');
+    api<SourceProbe>('/api/source/probe', { method: 'POST', body: JSON.stringify({ dir: '' }) })
+      .then((j) => { setProbe(j); setProbeMsg(''); })
+      .catch((e) => { setProbe(null); setProbeMsg(String(e)); });
+  };
 
   useEffect(() => {
     api<{ version: string }>('/api/health').then((j) => setVersion(j.version)).catch(() => setVersion('?'));
@@ -212,6 +247,15 @@ function App() {
         root: strmRoot,
         interval_hours: Math.max(0, Number(intervalH) || 0),
         jobs: jobsText.split('\n').map((s) => s.trim()).filter(Boolean),
+      },
+      source: {
+        ...nd.source,
+        kind: srcKind,
+        base: srcBase,
+        user: srcUser || null,
+        password: srcPass || null,
+        path_prefix: srcPrefix,
+        timeout_secs: Math.max(5, Number(srcTimeout) || 15),
       },
     };
     api('/api/netdisk', { method: 'PUT', body: JSON.stringify(body) })
@@ -355,6 +399,80 @@ function App() {
           <button style={btn} onClick={showPxLog}>看内核日志</button>
         </div>
         {pxLog && <pre style={pre}>{pxLog}</pre>}
+      </section>
+
+      <section style={card}>
+        <h3>目录源（网盘从哪读）</h3>
+        <p style={hint}>
+          桌面 / Docker / NAS 上 CloudDrive2 能把 115 挂成<b>本机目录</b>，选「本地挂载」即可；
+          <b>安卓没有挂载</b>（系统不给 FUSE），只能走 CD2 的 WebDAV —— 选「WebDAV」，
+          此时「要监控的网盘目录」填<b>网盘内路径</b>（如 <code>/115/看剧</code>）。
+        </p>
+
+        <div style={grid}>
+          <label style={lbl}>目录源类型
+            <select style={input} value={srcKind} onChange={(e) => setSrcKind(e.target.value)}>
+              <option value="local">本地挂载（用下面的 CD2 挂载根）</option>
+              <option value="webdav">WebDAV（CD2 /dav，安卓必选）</option>
+            </select>
+          </label>
+          {srcKind === 'webdav' && (
+            <>
+              <label style={lbl}>WebDAV 基址
+                <input style={input} value={srcBase} onChange={(e) => setSrcBase(e.target.value)}
+                  placeholder="http://127.0.0.1:19798/dav" />
+              </label>
+              <label style={lbl}>用户名（可留空）
+                <input style={input} value={srcUser} onChange={(e) => setSrcUser(e.target.value)} />
+              </label>
+              <label style={lbl}>密码（可留空）
+                <input style={input} type="password" value={srcPass} onChange={(e) => setSrcPass(e.target.value)} />
+              </label>
+              <label style={lbl}>网盘路径前缀（一般留空）
+                <input style={input} value={srcPrefix} onChange={(e) => setSrcPrefix(e.target.value)}
+                  placeholder="115open" />
+              </label>
+              <label style={lbl}>超时（秒）
+                <input style={input} value={srcTimeout} onChange={(e) => setSrcTimeout(e.target.value)} />
+              </label>
+            </>
+          )}
+        </div>
+
+        {nd && (
+          <p style={{ fontSize: 13 }}>
+            当前源：
+            <b style={{ color: nd.source_ok ? '#2a7' : '#c00' }}>{nd.source_ok ? nd.source_kind : '配置不完整'}</b>
+            {nd.source_root ? <> · <code>{nd.source_root}</code></> : null}
+            {srcKind === 'webdav' && <> · 内网请求<b>不走代理</b></>}
+          </p>
+        )}
+
+        <div style={row}>
+          <button style={btn} onClick={saveNetdisk}>保存</button>
+          <button style={btn} onClick={probeSource}>试连（列出源根）</button>
+        </div>
+
+        {probeMsg && <p style={{ fontSize: 12, color: '#c00' }}>{probeMsg}</p>}
+        {probe && (
+          <div style={{ fontSize: 12, marginTop: 8 }}>
+            <p>
+              <code>{probe.dir}</code> 下扫到 <b>{probe.total}</b> 个视频（试连只看一层，前 10 条）
+            </p>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead><tr><th>文件</th><th>网盘路径</th><th>直链</th></tr></thead>
+              <tbody>
+                {probe.sample.map((p, i) => (
+                  <tr key={i}>
+                    <td style={ellipsis}>{p.name}</td>
+                    <td style={ellipsis}>{p.cloud_path ?? '—'}</td>
+                    <td style={{ ...ellipsis, color: p.url ? '#2a7' : '#c00' }}>{p.url ?? '算不出'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section style={card}>

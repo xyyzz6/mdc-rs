@@ -185,6 +185,16 @@ async fn parse_file(Json(req): Json<ParseReq>) -> Json<mdc_core::parser::ParsedF
 struct NetdiskPutReq {
     netdisk: mdc_core::cd2::Cd2Config,
     strm: mdc_core::strm::StrmConfig,
+    /// 目录源。**可选**：老前端不带这个字段时保持原样，不把配置清空。
+    #[serde(default)]
+    source: Option<mdc_core::source::SourceConfig>,
+}
+
+#[derive(Deserialize)]
+struct SourceProbeReq {
+    /// 要探的目录；留空 = 源根（local 是挂载根，webdav 是基址）
+    #[serde(default)]
+    dir: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -293,27 +303,94 @@ async fn netdisk_state(State(state): State<AppState>) -> Json<serde_json::Value>
     let cfg = state.cfg.read().await.clone();
     let out_root = cfg.strm_root();
     let mount_root = cfg.netdisk.mount_root.trim();
-    let mount_ok = !mount_root.is_empty() && std::path::Path::new(mount_root).is_dir();
-    let job_states: Vec<serde_json::Value> = cfg
-        .strm
-        .jobs
-        .iter()
-        .map(|j| {
-            serde_json::json!({
-                "dir": j,
-                "exists": std::path::Path::new(j.trim()).is_dir(),
-            })
-        })
-        .collect();
+    // 🔴 目录存不存在要**问目录源**：webdav 源（安卓）下根本没有本机路径可以 `is_dir()`，
+    // 一律用 std::path 判断会让 APK 端永远显示「挂载未就绪」。
+    let src = cfg.dir_source().ok();
+    let mut mount_ok = false;
+    let mut job_states: Vec<serde_json::Value> = Vec::new();
+    if let Some(s) = &src {
+        mount_ok = match s.kind() {
+            mdc_core::source::SourceKind::Local => {
+                !mount_root.is_empty() && std::path::Path::new(mount_root).is_dir()
+            }
+            mdc_core::source::SourceKind::WebDav => matches!(s.exists_dir("/").await, Ok(true)),
+        };
+        for j in &cfg.strm.jobs {
+            let dir = j.trim();
+            let exists = !dir.is_empty() && matches!(s.exists_dir(dir).await, Ok(true));
+            job_states.push(serde_json::json!({ "dir": j, "exists": exists }));
+        }
+    }
     Json(serde_json::json!({
         "netdisk": cfg.netdisk,
         "strm": cfg.strm,
+        "source": cfg.source,
+        "source_kind": src.as_ref().map(|s| s.kind().to_string()),
+        "source_root": src.as_ref().map(|s| s.root()),
+        "source_ok": src.is_some(),
         "strm_root": out_root.to_string_lossy(),
         "manifest_path": cfg.strm_manifest_path().to_string_lossy(),
         "mount_ok": mount_ok,
         "out_writable": probe_writable(&out_root),
         "jobs": job_states,
     }))
+}
+
+/// 试连目录源：列出指定目录（默认源根）里的前若干条，并给出**直链样例**。
+///
+/// 目的很实际：用户填完 WebDAV 基址/挂载根后，得有个地方能立刻看到
+/// 「连上了没、网盘路径算得对不对」—— 否则只能等真跑一轮失败才知道。
+async fn source_probe(
+    State(state): State<AppState>,
+    Json(req): Json<SourceProbeReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cfg = state.cfg.read().await.clone();
+    let src = cfg
+        .dir_source()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    // 默认探**第一个监控目录**（没有才退回源根）：用户想验证的是「我配的那个目录通不通」，
+    // 探源根只能看到一层网盘名，看不出直链对不对。
+    let fallback = cfg
+        .strm
+        .jobs
+        .iter()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| src.root());
+    let dir = match req.dir.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(d) => d.to_string(),
+        None => fallback,
+    };
+    // 只探一层：探针要快，别一口气把整个网盘翻一遍
+    let entries = src
+        .list(&dir, false, 1)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("列目录失败：{e}")))?;
+    let sample: Vec<serde_json::Value> = entries
+        .iter()
+        .take(10)
+        .map(|e| {
+            let url = src
+                .cloud_path(&e.path)
+                .ok()
+                .and_then(|cp| mdc_core::cd2::build_url_from_cloud(&cp, &cfg.netdisk).ok());
+            serde_json::json!({
+                "path": e.path,
+                "name": e.name,
+                "size": e.size,
+                "cloud_path": src.cloud_path(&e.path).ok(),
+                "url": url,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "kind": src.kind().to_string(),
+        "root": src.root(),
+        "dir": dir,
+        "total": entries.len(),
+        "sample": sample,
+    })))
 }
 
 async fn put_netdisk(
@@ -323,6 +400,9 @@ async fn put_netdisk(
     let mut cfg = state.cfg.read().await.clone();
     cfg.netdisk = req.netdisk;
     cfg.strm = req.strm;
+    if let Some(src) = req.source {
+        cfg.source = src;
+    }
     cfg.save()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     *state.cfg.write().await = cfg;
@@ -334,6 +414,9 @@ async fn strm_scan(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let cfg = state.cfg.read().await.clone();
+    let src = cfg
+        .dir_source()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut items = Vec::new();
     let mut unparseable = 0usize;
     for job in &cfg.strm.jobs {
@@ -341,19 +424,24 @@ async fn strm_scan(
         if job.is_empty() {
             continue;
         }
-        let p = std::path::Path::new(job);
-        if !p.is_dir() {
+        if !matches!(src.exists_dir(job).await, Ok(true)) {
             continue;
         }
-        for f in mdc_core::strm::scan_source_dir(p, cfg.strm.recursive, cfg.strm.max_depth) {
-            let s = f.to_string_lossy().to_string();
+        let Ok(entries) = src.list(job, cfg.strm.recursive, cfg.strm.max_depth).await else {
+            continue;
+        };
+        for e in entries {
+            let s = e.path.clone();
             let parsed = mdc_core::parser::parse_filename(&s);
             if parsed.number.is_none() {
                 unparseable += 1;
                 continue;
             }
-            let url = mdc_core::cd2::build_url(&s, &cfg.netdisk)
-                .map(|u| u.to_string())
+            // 网盘路径由目录源给，直链再从网盘路径拼（安卓端没有本机路径可反推）
+            let url = src
+                .cloud_path(&s)
+                .ok()
+                .and_then(|cp| mdc_core::cd2::build_url_from_cloud(&cp, &cfg.netdisk).ok())
                 .unwrap_or_default();
             items.push(serde_json::json!({
                 "source": s,
@@ -742,6 +830,7 @@ async fn main() -> Result<()> {
         .route("/api/tasks/{id}", axum::routing::delete(delete_task))
         // 网盘 / .strm：全部在鉴权保护区内（读目录、写文件都不许裸奔）
         .route("/api/netdisk", get(netdisk_state).put(put_netdisk))
+        .route("/api/source/probe", post(source_probe))
         .route("/api/strm/scan", post(strm_scan))
         .route("/api/strm/run", post(strm_run))
         .route("/api/strm/status", get(strm_status))
