@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# 前端
+web/node_modules/
+web/dist/
+
+# 运行时数据（配置/数据库/密钥）
+data/
+test_data/
+*.db
+*.db-shm
+*.db-wal
+jwt_secret
+
+# 测试产物
+server_test*.log
+server_live*.log
+extracted/
+docker_layers/
+web/tsconfig.tsbuildinfo
+
+# 改前备份（一次性，不进版本库）
+_backup/
+
+# 系统
+.DS_Store
+Thumbs.db

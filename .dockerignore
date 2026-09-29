@@ -1,0 +1,33 @@
+# 构建上下文排除清单。
+#
+# 🔴 没有这个文件时 Docker 会把**整个项目目录**发给 daemon：
+#   - `target/` 动辄 8 GB+（这里实测 8.8 GB），构建慢到不可用甚至直接失败；
+#   - 更要命的是 `COPY web/ ./` 会把宿主机的 `node_modules` 覆盖到容器的 Linux 环境上，
+#     esbuild / rollup 的原生二进制架构不对 ⇒ `npm run build` 直接失败。
+#     （宿主是 Windows 时尤其明显，因为装的是 win32-x64 的二进制。）
+
+# 构建产物 / 依赖
+target/
+**/target/
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+
+# 运行时数据与产物
+data/
+test_data/
+test_media/
+_backup/
+tools/
+*.log
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# 文档与截图（不影响构建）
+_shots/
+*.md

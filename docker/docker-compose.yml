@@ -1,0 +1,27 @@
+services:
+  mdc-rs:
+    image: mdc-rs:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: mdc-rs
+    environment:
+      # 两个都设才启用登录鉴权。只在内存里生效，不会写进 config.toml。
+      - MDC_USERNAME=admin
+      - MDC_PASSWORD=admin
+    volumes:
+      - ./config:/config     # 配置与数据库（必须）
+      - ./media:/media       # 媒体库，可挂多个
+      # ── 网盘刮削（CD2 挂载 → .strm）──────────────────────────
+      # 把 CD2 的挂载目录挂进容器，容器内路径要和配置里的
+      # `netdisk.mount_root` **逐字一致**（挂载根按容器内路径算）。
+      # 只读挂载就够：mdc-rs 只读目录、不碰视频。
+      # - /mnt/clouddrive:/mnt/clouddrive:ro
+      # .strm + NFO + 海报的输出目录 —— Emby / Jellyfin 扫这个目录。
+      - ./strm:/media/mdc-strm
+    ports:
+      - "9208:9208"
+    restart: unless-stopped
+    # 容器默认以 root 跑。想换成别的 uid，把下面这行的注释去掉，
+    # 并确保 ./config 与 ./strm 在宿主机上属于该 uid（否则写不进去）：
+    # user: "1000:1000"

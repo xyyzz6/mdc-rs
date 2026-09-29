@@ -1,0 +1,17 @@
+[package]
+name = "mdc-mobile"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "mdc_mobile"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+mdc-core = { path = "../../crates/mdc-core" }
