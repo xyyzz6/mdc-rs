@@ -69,6 +69,12 @@ header .brand{max-width:880px;margin:0 auto}
 .tag.dim{color:var(--dim);background:var(--chip)}
 /* 内置 CD2 管理页内嵌框（设置页） */
 .cd2frame{width:100%;height:420px;border:1px solid var(--line);border-radius:12px;margin-top:12px;background:#000}
+/* 「从网盘选择监控目录」浏览面板 */
+.browsecard{margin-top:10px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.browsecrumbs{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:13px}
+.dirslist{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
+.dirrow{display:flex;gap:6px;align-items:stretch}
+.dirbtn{flex:1;text-align:left;min-width:0}
 .hint{font-size:13px;color:var(--dim);line-height:1.6;margin:4px 0 10px}
 .hint b{color:var(--fg)}
 

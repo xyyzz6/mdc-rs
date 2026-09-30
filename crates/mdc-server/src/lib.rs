@@ -131,6 +131,7 @@ pub fn build_router(state: AppState) -> Router {
         // 网盘 / .strm：全部在鉴权保护区内（读目录、写文件都不许裸奔）
         .route("/api/netdisk", get(netdisk_state).put(put_netdisk))
         .route("/api/source/probe", post(source_probe))
+        .route("/api/source/browse", get(source_browse))
         .route("/api/strm/scan", post(strm_scan))
         .route("/api/strm/run", post(strm_run))
         .route("/api/strm/status", get(strm_status))
@@ -576,11 +577,80 @@ async fn source_probe(
     })))
 }
 
+/// 浏览目录源的一层子目录（UI「从网盘选择监控目录」用）。
+/// `dir` 留空 = 源根。返回当前路径、上级路径、子目录列表。
+#[derive(Deserialize)]
+struct BrowseReq {
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+async fn source_browse(
+    State(state): State<AppState>,
+    Query(q): Query<BrowseReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cfg = state.cfg.read().await.clone();
+    let src = cfg
+        .dir_source()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let root = src.root();
+    let dir = match q.dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(d) => d.to_string(),
+        None => root.clone(),
+    };
+    if !src
+        .exists_dir(&dir)
+        .await
+        .unwrap_or(false)
+    {
+        return Err((StatusCode::BAD_REQUEST, format!("目录不存在：{dir}")));
+    }
+    let dirs = src
+        .list_dirs(&dir)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("列目录失败：{e}")))?;
+    // 上级路径：webdav 按 `/` 段回退（根的上级=空）；local 按 path parent
+    let parent: Option<String> = match src.kind() {
+        mdc_core::source::SourceKind::WebDav => {
+            let p = mdc_core::source::norm_dav_path(&dir);
+            if p == "/" {
+                None
+            } else {
+                Some(match p.rfind('/') {
+                    Some(0) => "/".to_string(),
+                    Some(i) => p[..i].to_string(),
+                    None => "/".to_string(),
+                })
+            }
+        }
+        _ => PathBuf::from(&dir)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string()),
+    };
+    let items: Vec<serde_json::Value> = dirs
+        .iter()
+        .map(|p| {
+            let name = p
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or(p)
+                .to_string();
+            serde_json::json!({ "path": p, "name": name })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "kind": src.kind().to_string(),
+        "root": root,
+        "dir": dir,
+        "parent": parent,
+        "dirs": items,
+    })))
+}
+
 async fn put_netdisk(
     State(state): State<AppState>,
     Json(req): Json<NetdiskPutReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut cfg = state.cfg.read().await.clone();
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {    let mut cfg = state.cfg.read().await.clone();
     cfg.netdisk = req.netdisk;
     cfg.strm = req.strm;
     if let Some(src) = req.source {

@@ -305,6 +305,35 @@ pub fn build_kernel_config(sub: &str, port: u16, expose_lan: bool) -> Result<Str
     set(m, "mixed-port", Value::Number(port.into()));
     set(m, "mode", Value::String("rule".into()));
     set(m, "log-level", Value::String("warning".into()));
+    // 🔴 geodata 鸡生蛋：订阅规则全是 GEOSITE/GEOIP，mihomo 首启要去
+    //    github 下载数据库 —— 而此刻代理还没起来，直连 github 必超时，
+    //    内核就一直起不来。换成国内可直连的 jsdelivr 镜像，并关掉自动更新。
+    set(m, "geo-auto-update", Value::Bool(false));
+    let mut gx = serde_yaml::Mapping::new();
+    for (k, v) in [
+        (
+            "geoip",
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip-lite.dat",
+        ),
+        (
+            "geosite",
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+        ),
+        (
+            "mmdb",
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country-lite.mmdb",
+        ),
+        (
+            "asn",
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
+        ),
+    ] {
+        gx.insert(
+            Value::String(k.into()),
+            Value::String(v.into()),
+        );
+    }
+    set(m, "geox-url", Value::Mapping(gx));
     if expose_lan {
         set(m, "allow-lan", Value::Bool(true));
         set(m, "bind-address", Value::String("*".into()));
@@ -435,6 +464,9 @@ rules:
         assert!(out.contains("mixed-port: 17890"));
         assert!(out.contains("allow-lan: false"));
         assert!(out.contains("bind-address: 127.0.0.1"));
+        // geodata 国内镜像注入：首启不用去 github 下载（代理还没起来，鸡生蛋）
+        assert!(out.contains("geo-auto-update: false"));
+        assert!(out.contains("jsdelivr.net/gh/MetaCubeX/meta-rules-dat"));
         // 能再解析回来 = 生成的是合法 YAML
         let v: Value = serde_yaml::from_str(&out).unwrap();
         assert_eq!(

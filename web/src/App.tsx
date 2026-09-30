@@ -187,6 +187,11 @@ function App() {
   const [probe, setProbe] = useState<SourceProbe | null>(null);
   const [probeMsg, setProbeMsg] = useState('');
 
+  // 「从网盘选择监控目录」面板：服务端经目录源列一层子目录
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const [browseData, setBrowseData] = useState<{ kind: string; root: string; dir: string; parent: string | null; dirs: { path: string; name: string }[] } | null>(null);
+  const [browseMsg, setBrowseMsg] = useState('');
+
   const [px, setPx] = useState<ProxyStatus | null>(null);
   const [pxLog, setPxLog] = useState('');
 
@@ -400,6 +405,26 @@ function App() {
     api<{ alive: boolean; url: string; dav: string }>('/api/cd2/status')
       .then(setCd2)
       .catch(() => setCd2(null));
+
+  const loadBrowse = (dir: string) => {
+    setBrowseMsg('');
+    api<{ kind: string; root: string; dir: string; parent: string | null; dirs: { path: string; name: string }[] }>(
+      `/api/source/browse?dir=${encodeURIComponent(dir)}`,
+    )
+      .then(setBrowseData)
+      .catch((e) => setBrowseMsg(String(e)));
+  };
+  const openBrowse = () => {
+    setBrowseOpen(true);
+    // 贴心起点：已填的第一个监控目录（没有才从源根开始）
+    const first = jobsText.split('\n').map((s) => s.trim()).find(Boolean) ?? '';
+    loadBrowse(first);
+  };
+  const addJob = (path: string) => {
+    const cur = jobsText.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (cur.includes(path)) return;
+    setJobsText([...cur, path].join('\n'));
+  };
 
   const showPxLog = () =>
     api<{ log: string }>('/api/proxy/log?lines=80')
@@ -721,10 +746,42 @@ function App() {
             <label className="lbl">自动运行间隔（小时，0 = 只手动）
               <input value={intervalH} onChange={(e) => setIntervalH(e.target.value)} placeholder="0" />
             </label>
-            <label className="lbl wide">要监控的网盘目录（一行一个）
+            <div className="lbl wide">
+              <span>要监控的网盘目录（一行一个）</span>
+              <button className="btn sm" style={{ marginLeft: 8 }} type="button" onClick={openBrowse}>从网盘选择</button>
               <textarea className="mono" value={jobsText} onChange={(e) => setJobsText(e.target.value)}
                 placeholder={'/mnt/clouddrive/115/看剧\n/mnt/clouddrive/115/新作'} />
-            </label>
+              {browseOpen && (
+                <div className="browsecard">
+                  <div className="browsecrumbs">
+                    <b className="ell" style={{ flex: 1 }}>{browseData?.dir ?? '加载中…'}</b>
+                    {browseData?.parent && (
+                      <button className="btn sm" type="button" onClick={() => loadBrowse(browseData.parent!)}>← 上级</button>
+                    )}
+                    <button className="btn sm" type="button" onClick={() => setBrowseOpen(false)}>收起</button>
+                  </div>
+                  {browseMsg && <p className="hint st-err">{browseMsg}</p>}
+                  {browseData && browseData.dirs.length === 0 && (
+                    <p className="hint">此目录下没有子目录 —— 直接「＋选用当前目录」即可。</p>
+                  )}
+                  <div className="dirslist">
+                    {browseData?.dirs.map((d) => (
+                      <div key={d.path} className="dirrow">
+                        <button className="btn sm dirbtn ell" type="button" title={d.path}
+                          onClick={() => loadBrowse(d.path)}>📁 {d.name}</button>
+                        <button className="btn sm pri" type="button" title="加入监控"
+                          onClick={() => addJob(d.path)}>＋</button>
+                      </div>
+                    ))}
+                  </div>
+                  {browseData && (
+                    <div className="row" style={{ marginTop: 8 }}>
+                      <button className="btn pri sm" type="button" onClick={() => addJob(browseData.dir)}>＋选用当前目录</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {status && (

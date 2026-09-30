@@ -135,6 +135,8 @@ pub trait DirSource: Send + Sync + std::fmt::Debug {
     async fn exists_dir(&self, dir: &str) -> Result<bool>;
     /// 列出 `dir` 下的**视频文件**。`recursive=false` 只看一层；`max_depth=0` 表示不限。
     async fn list(&self, dir: &str, recursive: bool, max_depth: u32) -> Result<Vec<DirEntry>>;
+    /// 列出 `dir` 下的**一层子目录**（UI 的「从网盘选择监控目录」用）。
+    async fn list_dirs(&self, dir: &str) -> Result<Vec<String>>;
     /// 网盘内路径（`/115/电影/x.mp4`），喂给 `cd2::build_url_from_cloud`。
     fn cloud_path(&self, path: &str) -> Result<String>;
 }
@@ -223,6 +225,19 @@ impl DirSource for LocalFs {
         let mut out = Vec::new();
         walk_local(Path::new(dir), 0, recursive, max_depth, &mut out);
         out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
+    async fn list_dirs(&self, dir: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if e.path().is_dir() {
+                    out.push(e.path().to_string_lossy().to_string());
+                }
+            }
+        }
+        out.sort();
         Ok(out)
     }
 
@@ -421,6 +436,24 @@ impl DirSource for WebDav {
         } else {
             Ok(format!("/{prefix}{p}"))
         }
+    }
+
+    async fn list_dirs(&self, dir: &str) -> Result<Vec<String>> {
+        let d = norm_dav_path(dir);
+        let mut out = Vec::new();
+        for e in self.propfind(&d).await? {
+            if e.path == d {
+                continue; // 响应第一条是目录自己
+            }
+            if skip_name(&e.name) {
+                continue;
+            }
+            if e.kind == EntryKind::Dir {
+                out.push(e.path);
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 }
 
