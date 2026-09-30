@@ -164,6 +164,12 @@ function App() {
   const [dir, setDir] = useState('');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [msg, setMsg] = useState('');
+  // 结果型横幅 8s 自动消失（进行中消息完成时会被新值覆盖/清除，不会误伤）
+  useEffect(() => {
+    if (!msg) return;
+    const t = setTimeout(() => setMsg(''), 8000);
+    return () => clearTimeout(t);
+  }, [msg]);
 
   const [nd, setNd] = useState<NetdiskState | null>(null);
   const [host, setHost] = useState('');
@@ -351,6 +357,11 @@ function App() {
   // 内核一跑起来就拉节点分组；运行状态下每 15s 刷新（订阅节点会变）
   const phaseKey = px ? JSON.stringify(px.phase) : '';
   useEffect(() => {
+    // 内核状态有了结果（Running/Failed）就清掉「正在后台拉起内核…」横幅——
+    // 不然它永远挂着，看起来像一直卡在保存中（真机截图实锤）
+    if (px && typeof px.phase === 'object') {
+      setMsg((m) => (m === '代理配置已保存，正在后台拉起内核…' ? '' : m));
+    }
     if (px && typeof px.phase === 'object' && 'running' in px.phase) {
       loadGroups();
       const t = setInterval(loadGroups, 15000);
