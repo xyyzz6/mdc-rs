@@ -567,17 +567,26 @@ function App() {
       // 走同源 stream 接口（不是 302 直链）—— 跨源 video 会污染 canvas，
       // toDataURL 直接抛 SecurityError
       v.src = `${API_BASE}/api/library/${encodeURIComponent(number)}/stream?file=${file}${mediaQuery().replace('?', '&')}`;
-      await new Promise<void>((res, rej) => {
-        const t = setTimeout(() => rej(new Error('视频加载超时（网盘直链不通？）')), 40000);
+      // 5.7GB 的 115 直链：CD2 现取向 115 要真实地址就要好几秒，40s 根本不够
+      const loadWithTimeout = (ms: number) => new Promise<void>((res, rej) => {
+        const t = setTimeout(() => rej(new Error('视频加载超时')), ms);
         v.onloadeddata = () => { clearTimeout(t); res(); };
         v.onerror = () => { clearTimeout(t); rej(new Error('视频加载失败')); };
       });
+      try {
+        await loadWithTimeout(90000);
+      } catch (first) {
+        // 重试一次：重新赋 src 触发全新加载（首次可能撞上直链冷启动）
+        await new Promise((r) => setTimeout(r, 1500));
+        v.load();
+        await loadWithTimeout(90000).catch(() => { throw first; });
+      }
       // 片头常是黑屏/厂牌 LOGO —— 跳到 20% 或 30 秒处再截
       const dur = v.duration || 0;
       const target = dur > 2 ? Math.min(dur * 0.2, Math.max(dur - 1, 1)) : 0;
       if (target > 0) {
         await new Promise<void>((res) => {
-          const t = setTimeout(res, 15000);
+          const t = setTimeout(res, 25000);
           v.onseeked = () => { clearTimeout(t); res(); };
           v.currentTime = target;
         });

@@ -1264,7 +1264,10 @@ async fn library_stream(
     let client = match mdc_core::net::client(mdc_core::net::HttpOpts {
         proxy: None,
         no_proxy: &["127.0.0.1".to_string()],
-        timeout_secs: 120,
+        // 🔴 总超时必须极大：这是**流式转发**（视频可能播很久），reqwest 的
+        //    timeout 覆盖整个 body 读取期 —— 120s 会把长流掐断（真机截图
+        //    实锤「视频加载失败」）。video 端有自己的超时，断开时流自然 drop。
+        timeout_secs: 86400,
     }) {
         Ok(c) => c,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
