@@ -219,6 +219,14 @@ impl AppConfig {
     pub fn strm_root(&self) -> PathBuf {
         let r = self.strm.root.trim();
         if r.is_empty() {
+            // 安卓壳注入的外部落点优先（douyin-nas 同款思路）：
+            // /storage/emulated/0/Android/data/<pkg>/files/strm —— Emby/Jellyfin
+            // 手机端能直接扫；内部 /data/data 目录别的 App 读不到。
+            if let Ok(p) = std::env::var("MDC_STRM_ROOT") {
+                if !p.trim().is_empty() {
+                    return PathBuf::from(p);
+                }
+            }
             Self::data_dir().join("strm")
         } else {
             PathBuf::from(r)

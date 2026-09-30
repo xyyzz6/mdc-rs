@@ -178,7 +178,7 @@ function App() {
   const [scan, setScan] = useState<StrmScan | null>(null);
 
   // 目录源：网盘是挂成本机目录（local）还是走 WebDAV（webdav —— 安卓唯一可行）
-  const [srcKind, setSrcKind] = useState('local');
+  const [srcKind, setSrcKind] = useState('webdav'); // 安卓没有 FUSE 挂载，webdav 才是对的正确默认
   const [srcBase, setSrcBase] = useState('http://127.0.0.1:19798/dav');
   const [srcUser, setSrcUser] = useState('');
   const [srcPass, setSrcPass] = useState('');
@@ -191,6 +191,7 @@ function App() {
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseData, setBrowseData] = useState<{ kind: string; root: string; dir: string; parent: string | null; dirs: { path: string; name: string }[] } | null>(null);
   const [browseMsg, setBrowseMsg] = useState('');
+  const [advOpen, setAdvOpen] = useState(false);
 
   const [px, setPx] = useState<ProxyStatus | null>(null);
   const [pxLog, setPxLog] = useState('');
@@ -364,8 +365,8 @@ function App() {
     if (v === 'lib') loadLib();
   };
 
-  const saveNetdisk = () => {
-    if (!nd) return;
+  const fetchSave = () => {
+    if (!nd) return Promise.reject('配置未加载');
     const body = {
       netdisk: { ...nd.netdisk, host, port: Number(port) || 19798, mount_root: mountRoot, path_prefix: prefix },
       strm: {
@@ -385,8 +386,22 @@ function App() {
       },
     };
     api('/api/netdisk', { method: 'PUT', body: JSON.stringify(body) })
-      .then(() => { setMsg('网盘配置已保存'); loadNetdisk(); loadStatus(); })
-      .catch((e) => setMsg(String(e)));
+      .then(() => { loadNetdisk(); loadStatus(); })
+      .catch((e) => { setMsg(String(e)); throw e; });
+  };
+
+  const saveAndRun = async () => {
+    if (!nd) return;
+    // douyin-nas 式串联：保存完直接跑一轮（扫网盘 → 写 strm → 刮 NFO/海报），
+    // 完成后媒体库立刻可见 —— 不用让用户再去找「运行一轮」
+    setMsg('保存中…');
+    try {
+      await fetchSave();
+    } catch (e) {
+      setMsg(String(e));
+      return;
+    }
+    runStrm(false);
   };
 
   const runStrm = (force: boolean) => {
@@ -691,9 +706,12 @@ function App() {
         <section className="card">
           <div className="thead">目录源 {nd && <span className={`tag ${nd.source_ok ? 'ok' : 'err'}`}>{nd.source_ok ? (nd.source_kind ?? 'ok') : '配置不完整'}</span>}</div>
           <p className="hint">
-            桌面 / Docker / NAS 上 CloudDrive2 能把 115 挂成<b>本机目录</b>，选「本地挂载」即可；
-            <b>安卓没有挂载</b>（系统不给 FUSE），只能走 CD2 的 WebDAV —— 选「WebDAV」，
-            此时「要监控的网盘目录」填<b>网盘内路径</b>（如 <code>/115/看剧</code>）。
+            <b>三步上手（手机端默认全连内置 CD2，什么都不用改）：</b><br />
+            ① 到「内置 CD2 引擎」打开管理页，登录 CD2 账号并挂载 115；<br />
+            ② 下面填<b>同一组 CD2 账号密码</b>，点「保存」；<br />
+            ③ 在下方「网盘刮削」里<b>从网盘选择</b>要监控的目录，点「保存并生成 strm」——
+            生成 + 刮削 + 媒体库一次完成。
+            桌面 / NAS 上连的是别的机器的 CD2 时，把基址改成它的地址即可。
           </p>
 
           <div className="grid">
@@ -705,23 +723,32 @@ function App() {
             </label>
             {srcKind === 'webdav' && (
               <>
-                <label className="lbl">WebDAV 基址
+                <label className="lbl">WebDAV 基址（内置 CD2 不用改）
                   <input value={srcBase} onChange={(e) => setSrcBase(e.target.value)}
                     placeholder="http://127.0.0.1:19798/dav" />
                 </label>
-                <label className="lbl">用户名（可留空）
-                  <input value={srcUser} onChange={(e) => setSrcUser(e.target.value)} />
+                <label className="lbl">CD2 用户名
+                  <input value={srcUser} onChange={(e) => setSrcUser(e.target.value)}
+                    placeholder="和 CD2 管理页登录的同一组账号" />
                 </label>
-                <label className="lbl">密码（可留空）
-                  <input type="password" value={srcPass} onChange={(e) => setSrcPass(e.target.value)} />
+                <label className="lbl">CD2 密码
+                  <input type="password" value={srcPass} onChange={(e) => setSrcPass(e.target.value)}
+                    placeholder="和 CD2 管理页登录的同一组密码" />
                 </label>
-                <label className="lbl">网盘路径前缀（一般留空）
-                  <input value={srcPrefix} onChange={(e) => setSrcPrefix(e.target.value)}
-                    placeholder="115open" />
-                </label>
-                <label className="lbl">超时（秒）
-                  <input value={srcTimeout} onChange={(e) => setSrcTimeout(e.target.value)} />
-                </label>
+                {advOpen && (
+                  <>
+                    <label className="lbl">网盘路径前缀（一般留空）
+                      <input value={srcPrefix} onChange={(e) => setSrcPrefix(e.target.value)}
+                        placeholder="115open" />
+                    </label>
+                    <label className="lbl">超时（秒）
+                      <input value={srcTimeout} onChange={(e) => setSrcTimeout(e.target.value)} />
+                    </label>
+                  </>
+                )}
+                <button className="btn sm" type="button" onClick={() => setAdvOpen((v) => !v)}>
+                  {advOpen ? '收起高级选项' : '高级选项'}
+                </button>
               </>
             )}
           </div>
@@ -735,7 +762,7 @@ function App() {
           )}
 
           <div className="row">
-            <button className="btn pri" onClick={saveNetdisk}>保存</button>
+            <button className="btn pri" onClick={fetchSave}>保存</button>
             <button className="btn" onClick={probeSource}>试连（列出源根）</button>
           </div>
 
@@ -857,8 +884,8 @@ function App() {
           )}
 
           <div className="row">
-            <button className="btn pri" onClick={() => runStrm(false)}>运行一轮</button>
-            <button className="btn" onClick={saveNetdisk}>保存</button>
+            <button className="btn pri" onClick={saveAndRun}>保存并生成 strm</button>
+            <button className="btn" onClick={() => runStrm(false)}>只运行一轮（用已保存配置）</button>
             <button className="btn" onClick={() =>
               api<StrmScan>('/api/strm/scan', { method: 'POST', body: '{}' })
                 .then((s) => { setScan(s); setMsg(''); })

@@ -49,6 +49,17 @@ pub fn run() {
             let data = app.path().app_data_dir()?;
             std::env::set_var("MDC_CONFIG_PATH", &data);
             std::env::set_var("MDC_BIND", "127.0.0.1:9208");
+            // 🔴 .strm 落点用外部存储的 app 私有目录（douyin-nas 同款）：
+            //    /storage/emulated/0/Android/data/<pkg>/files/strm —— Emby/Jellyfin
+            //    手机端能直接扫这个目录建媒体库；内部 /data/data 目录别的 App
+            //    读不到，落那里等于白生成。建不出来（老系统怪癖）就回落 data_dir。
+            let pkg = app.config().identifier.clone(); // com.mdcrs.mobile（外部目录路径里必须是包名）
+            let ext_strm = PathBuf::from(format!(
+                "/storage/emulated/0/Android/data/{pkg}/files/strm"
+            ));
+            if std::fs::create_dir_all(&ext_strm).is_ok() {
+                std::env::set_var("MDC_STRM_ROOT", &ext_strm);
+            }
             // 🔴 代理内核：APK 把 mihomo 以 libmihomo.so 携带，安装后落在
             //    nativeLibraryDir（Android 10 W^X 下唯一可 exec 的目录）。
             //    find_kernel 的第二优先级（MDC_PROXY_KERNEL 环境变量）接住它。
