@@ -768,7 +768,7 @@ function App() {
     <>
       <header>
         <div className="brand">
-          <h1>MDC-RS {version && <span className="ver">v{version}</span>}</h1>
+          <h1>拾光 <span className="ver2">PickLight</span> {version && <span className="ver">v{version}</span>}</h1>
           <div className="sub">115 网盘刮削 · .strm 生成 · 内置代理内核</div>
         </div>
       </header>

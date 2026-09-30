@@ -47,6 +47,10 @@ pub fn run() {
             // 数据目录必须指到应用私有目录：/data/data/<pkg>/ 下，
             // 再用相对路径 ./data 会落进不可写的安装目录。
             let data = app.path().app_data_dir()?;
+            // 🔴 换包名（com.mdcrs.mobile → com.picklight.app）后数据目录也跟着
+            //    换 —— 首次启动把旧包名下的东西（config.toml / mdc.db /
+            //    strm / CD2 的 home）全搬过来，用户不用重配一遍。
+            migrate_from_old_pkg(&data);
             std::env::set_var("MDC_CONFIG_PATH", &data);
             std::env::set_var("MDC_BIND", "127.0.0.1:9208");
             // .strm 落点 = 应用私有目录（data_dir/strm）。自带媒体库 302 播放
@@ -99,6 +103,45 @@ pub fn run() {
 }
 
 /// 进程内启动完整引擎：与桌面 exe 完全同套路由/状态（mdc-server 库入口）。
+/// 从旧包名目录迁移数据到新的 app 数据目录。**只在目标目录还是空的时候搬**，
+/// 搬完不删旧目录（万一出事还能取回来）。搬不动就跳过，绝不让启动失败。
+fn migrate_from_old_pkg(new_dir: &Path) {
+    const OLD: &str = "/data/user/0/com.mdcrs.mobile";
+    let old = PathBuf::from(OLD);
+    if !old.is_dir() {
+        return;
+    }
+    let already = std::fs::read_dir(new_dir)
+        .map(|rd| rd.count() > 0)
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+    if !std::fs::create_dir_all(new_dir).is_ok() {
+        return;
+    }
+    fn copy_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for e in std::fs::read_dir(src)?.flatten() {
+            let to = dst.join(e.file_name());
+            let ft = e.file_type()?;
+            if ft.is_dir() {
+                copy_all(&e.path(), &to)?;
+            } else if ft.is_file() && !to.exists() {
+                let _ = std::fs::copy(e.path(), &to);
+            }
+        }
+        Ok(())
+    }
+    match copy_all(&old, new_dir) {
+        Ok(_) => {
+            // 日志还没起来，写 stderr（adb logcat 可见）
+            eprintln!("[picklight] 已从旧包名目录迁移数据：{OLD}");
+        }
+        Err(e) => eprintln!("[picklight] 迁移旧数据失败（忽略）：{e}"),
+    }
+}
+
 async fn start_engine() -> anyhow::Result<()> {
     let state = mdc_server::build_state().await?;
     mdc_server::serve(state).await

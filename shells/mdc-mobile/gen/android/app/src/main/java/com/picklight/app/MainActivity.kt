@@ -1,4 +1,4 @@
-package com.mdcrs.mobile
+package com.picklight.app
 
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge

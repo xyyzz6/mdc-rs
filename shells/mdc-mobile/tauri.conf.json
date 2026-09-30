@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MDC-RS",
+  "productName": "拾光",
   "version": "0.1.0",
-  "identifier": "com.mdcrs.mobile",
+  "identifier": "com.picklight.app",
   "build": {
     "frontendDist": "../../web/dist"
   },
