@@ -162,6 +162,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/cd2/status", get(cd2_status))
         // 移出库（删 .strm/NFO/海报 + 清单条目）；重新匹配也走它
         .route("/api/library/{number}", delete(library_remove))
+        .route("/api/library/{number}/stream", get(library_stream))
+        .route("/api/library/{number}/poster", post(library_frame))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // login/health 公开；其余 API 过鉴权
@@ -1229,6 +1231,116 @@ async fn library_play(
     }
     // 302 Found：`<video>`/浏览器对 3xx 一视同仁地跟随
     Redirect::to(&url).into_response()
+}
+
+/// 同源视频流（**转发而非 302**）。
+///
+/// 为什么必须有这个接口：前端要从视频里截一帧当封面时，`<video>` 必须同源，
+/// 否则 canvas 被跨域污染、`toDataURL()` 直接抛 SecurityError —— 而 CD2 的
+/// 直链不带 CORS 头。播放仍走 302 直链（不占本进程带宽），只有截帧走这里。
+async fn library_stream(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+    Query(f): Query<PlayQuery>,
+    req: Request,
+) -> Response {
+    let items = match load_library(&state).await {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let found = items
+        .iter()
+        .find(|e| e.number == number)
+        .or_else(|| items.iter().find(|e| e.number.eq_ignore_ascii_case(&number)));
+    let Some(e) = found else {
+        return (StatusCode::NOT_FOUND, format!("库里没有 {number}")).into_response();
+    };
+    let idx = f.file.min(e.files.len().saturating_sub(1));
+    let url = e.files[idx].url.trim().to_string();
+    if url.is_empty() {
+        return (StatusCode::NOT_FOUND, "直链为空").into_response();
+    }
+    // CD2 在 127.0.0.1：内网直连（不进代理，也不吃 env 代理）
+    let client = match mdc_core::net::client(mdc_core::net::HttpOpts {
+        proxy: None,
+        no_proxy: &["127.0.0.1".to_string()],
+        timeout_secs: 120,
+    }) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let mut up = client.get(&url);
+    // Range 必须一路转发，否则 <video> 没法 seek（截帧要跳到 20% 位置）
+    if let Some(rg) = req.headers().get(header::RANGE) {
+        up = up.header(header::RANGE, rg.as_bytes());
+    }
+    let resp = match up.send().await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("取不到视频流：{e}")).into_response(),
+    };
+    let mut b = Response::builder().status(resp.status());
+    for h in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::ACCEPT_RANGES,
+        header::CONTENT_RANGE,
+    ] {
+        if let Some(v) = resp.headers().get(&h) {
+            b = b.header(h, v.clone());
+        }
+    }
+    // 前端 canvas 要靠它（同源其实不需要，但带上更保险）
+    b = b.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+    match b.body(axum::body::Body::from_stream(resp.bytes_stream())) {
+        Ok(r) => r,
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// 存前端截的一帧当封面（data:image/jpeg;base64,...）。
+/// 写到 .strm 同目录同 stem 的 `-poster.jpg` 与 `.jpg`（媒体库两个名字都认）。
+#[derive(Deserialize)]
+struct PosterReq {
+    #[serde(default)]
+    file: usize,
+    data: String,
+}
+
+async fn library_frame(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+    Json(req): Json<PosterReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let items = load_library(&state).await?;
+    let entry = items
+        .iter()
+        .find(|e| e.number.eq_ignore_ascii_case(&number))
+        .ok_or((StatusCode::NOT_FOUND, format!("库里没有 {number}")))?;
+    let idx = req.file.min(entry.files.len().saturating_sub(1));
+    let dest = PathBuf::from(&entry.files[idx].dest);
+    let b64 = req.data.split(',').last().unwrap_or(&req.data).trim();
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("封面数据不是合法 base64：{e}")))?;
+    if bytes.len() < 1024 {
+        return Err((StatusCode::BAD_REQUEST, "截帧太小（可能视频没加载出来）".into()));
+    }
+    let stem = dest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or((StatusCode::BAD_REQUEST, "文件名异常".to_string()))?;
+    let dir = dest.parent().unwrap_or(&dest);
+    let a = dir.join(format!("{stem}-poster.jpg"));
+    let b = dir.join(format!("{stem}.jpg"));
+    std::fs::write(&a, &bytes)
+        .and_then(|_| std::fs::write(&b, &bytes))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写封面失败：{e}")))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "bytes": bytes.len(),
+        "poster": a.to_string_lossy(),
+    })))
 }
 
 /// 移出库：删该番号的 .strm/NFO/海报 + 清单条目。重新匹配（采用人工精选

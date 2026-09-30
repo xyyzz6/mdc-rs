@@ -220,6 +220,7 @@ function App() {
   // 重新匹配（详情页：调多源，选中即存人工精选 + 移出库，下轮按新元数据重建）
   const [rematchOpen, setRematchOpen] = useState(false);
   const [rematchList, setRematchList] = useState<{ provider: string; status: string; error?: string; meta?: VideoMeta }[] | null>(null);
+  const autoGrabbed = useRef<Set<string>>(new Set());
 
   const loadLib = (query = libQuery) => {
     setLibLoading(true);
@@ -236,7 +237,14 @@ function App() {
 
   const openDetail = (number: string) => {
     api<LibDetail>(`/api/library/${encodeURIComponent(number)}`)
-      .then(setDetail)
+      .then((d) => {
+        setDetail(d);
+        // 没海报（刮削没出图 / 无番号文件）就后台自动截一帧，一部只试一次
+        if (!d.poster && !autoGrabbed.current.has(number)) {
+          autoGrabbed.current.add(number);
+          setTimeout(() => grabFrame(number, 0), 300);
+        }
+      })
       .catch((e) => setMsg(String(e)));
   };
 
@@ -493,6 +501,52 @@ function App() {
   };
 
   // ---------- 重新匹配（详情页：多源查询 → 采用人工精选 → 移出库待重建） ----------
+  // ---------- 从视频截一帧当封面（刮削没海报时的兜底） ----------
+  const grabFrame = async (number: string, file: number) => {
+    setMsg('正在从视频截取封面…');
+    try {
+      const v = document.createElement('video');
+      v.crossOrigin = 'anonymous';
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = 'auto';
+      // 走同源 stream 接口（不是 302 直链）—— 跨源 video 会污染 canvas，
+      // toDataURL 直接抛 SecurityError
+      v.src = `${API_BASE}/api/library/${encodeURIComponent(number)}/stream?file=${file}${mediaQuery().replace('?', '&')}`;
+      await new Promise<void>((res, rej) => {
+        const t = setTimeout(() => rej(new Error('视频加载超时（网盘直链不通？）')), 40000);
+        v.onloadeddata = () => { clearTimeout(t); res(); };
+        v.onerror = () => { clearTimeout(t); rej(new Error('视频加载失败')); };
+      });
+      // 片头常是黑屏/厂牌 LOGO —— 跳到 20% 或 30 秒处再截
+      const dur = v.duration || 0;
+      const target = dur > 2 ? Math.min(dur * 0.2, Math.max(dur - 1, 1)) : 0;
+      if (target > 0) {
+        await new Promise<void>((res) => {
+          const t = setTimeout(res, 15000);
+          v.onseeked = () => { clearTimeout(t); res(); };
+          v.currentTime = target;
+        });
+      }
+      const c = document.createElement('canvas');
+      c.width = v.videoWidth || 1280;
+      c.height = v.videoHeight || 720;
+      const ctx = c.getContext('2d');
+      if (!ctx) throw new Error('画布不可用');
+      ctx.drawImage(v, 0, 0, c.width, c.height);
+      const data = c.toDataURL('image/jpeg', 0.85);
+      await api(`/api/library/${encodeURIComponent(number)}/poster`, {
+        method: 'POST',
+        body: JSON.stringify({ file, data }),
+      });
+      setMsg('封面已截取');
+      loadLib();
+      api<LibDetail>(`/api/library/${encodeURIComponent(number)}`).then(setDetail).catch(() => {});
+    } catch (e) {
+      setMsg(`截帧失败：${String(e)}`);
+    }
+  };
+
   const openRematch = () => {
     if (!detail) return;
     setRematchOpen(true);
@@ -1199,6 +1253,10 @@ function App() {
                     setDetail(null);
                   } catch (e) { setMsg(String(e)); }
                 }}>移出库</button>
+              <button className="btn sm" type="button"
+                onClick={() => grabFrame(detail.number, 0)}>
+                {detail.poster ? '重新截封面' : '截取封面'}
+              </button>
               {/* 🔴 只对「长得像番号」的条目提供重新匹配：无番号文件拿文件名
                   去搜只会配出不相干的影片（真机截图实锤：7126895c_... 搜出 MUM-07） */}
               {/[A-Za-z]{2,6}-?\d{2,}/.test(detail.number) && (
