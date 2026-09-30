@@ -823,37 +823,37 @@ async fn strm_run(
     let s2 = state.clone();
     tokio::spawn(async move {
         let runner = s2.strm_runner.clone();
-        match scrape::ScrapeCtx::from_config(&cfg) {
-            Ok(ctx) => {
-                match pipeline::run_strm_jobs(
-                    &runner,
-                    &s2.pool,
-                    &s2.engine,
-                    &ctx,
-                    &cfg,
-                    force,
-                )
-                .await
-                {
-                    Ok(stats) => {
-                        runner.set_stats(Some(
-                            serde_json::to_string(&stats).unwrap_or_default(),
-                        ));
-                        tracing::info!(
-                            added = stats.added,
-                            failed = stats.failed,
-                            skipped = stats.skipped,
-                            "strm 一轮完成"
-                        );
-                    }
-                    Err(e) => {
-                        runner.set_stats(Some(format!("ERR: {e:#}")));
-                        tracing::error!(error = %e, "strm 一轮失败");
-                    }
-                }
+        let ctx = match scrape_ctx(&s2).await {
+            Ok(c) => c,
+            Err(e) => {
+                runner.set_stats(Some(format!("ERR: {e}")));
+                return;
+            }
+        };
+        match pipeline::run_strm_jobs(
+            &runner,
+            &s2.pool,
+            &s2.engine,
+            &ctx,
+            &cfg,
+            force,
+        )
+        .await
+        {
+            Ok(stats) => {
+                runner.set_stats(Some(
+                    serde_json::to_string(&stats).unwrap_or_default(),
+                ));
+                tracing::info!(
+                    added = stats.added,
+                    failed = stats.failed,
+                    skipped = stats.skipped,
+                    "strm 一轮完成"
+                );
             }
             Err(e) => {
-                runner.set_stats(Some(format!("ERR: 构建 HTTP 客户端失败: {e}")));
+                runner.set_stats(Some(format!("ERR: {e:#}")));
+                tracing::error!(error = %e, "strm 一轮失败");
             }
         }
     });
@@ -914,34 +914,34 @@ async fn strm_scheduler(state: AppState) {
         }
 
         let cfg = state.cfg.read().await.clone();
-        match scrape::ScrapeCtx::from_config(&cfg) {
-            Ok(ctx) => {
-                tracing::info!(interval_hours, "定时轮：开始网盘刮削");
-                match pipeline::run_strm_jobs(
-                    &state.strm_runner,
-                    &state.pool,
-                    &state.engine,
-                    &ctx,
-                    &cfg,
-                    false,
-                )
-                .await
-                {
-                    Ok(s) => tracing::info!(
-                        total = s.total,
-                        added = s.added,
-                        skipped = s.skipped,
-                        failed = s.failed,
-                        "定时轮完成"
-                    ),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "定时轮失败，{ERR_RETRY}s 后重试");
-                        tokio::time::sleep(std::time::Duration::from_secs(ERR_RETRY)).await;
-                    }
-                }
-            }
+        let ctx = match scrape_ctx(&state).await {
+            Ok(c) => c,
             Err(e) => {
-                tracing::error!(error = %e, "定时轮构建 HTTP 客户端失败");
+                tracing::error!(error = %e, "定时轮构建刮削上下文失败");
+                tokio::time::sleep(std::time::Duration::from_secs(ERR_RETRY)).await;
+                continue;
+            }
+        };
+        tracing::info!(interval_hours, "定时轮：开始网盘刮削");
+        match pipeline::run_strm_jobs(
+            &state.strm_runner,
+            &state.pool,
+            &state.engine,
+            &ctx,
+            &cfg,
+            false,
+        )
+        .await
+        {
+            Ok(s) => tracing::info!(
+                total = s.total,
+                added = s.added,
+                skipped = s.skipped,
+                failed = s.failed,
+                "定时轮完成"
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "定时轮失败，{ERR_RETRY}s 后重试");
                 tokio::time::sleep(std::time::Duration::from_secs(ERR_RETRY)).await;
             }
         }
@@ -985,13 +985,28 @@ fn collect_strm(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<Str
     }
 }
 
+/// 构建刮削上下文。代理优先级：**内置内核 effective_proxy**（Running=内核
+/// 17890，否则回落 proxy.external_proxy）→ cfg.common.proxy → 直连。
+/// 🔴 之前只看 common.proxy —— 内核跑起来了刮削还在直连（真机「全部 failed」实锤）。
+async fn scrape_ctx(state: &AppState) -> Result<scrape::ScrapeCtx, String> {
+    let cfg = state.cfg.read().await.clone();
+    let proxy = state
+        .proxy
+        .lock()
+        .await
+        .effective_proxy()
+        .or_else(|| cfg.common.proxy.clone());
+    scrape::ScrapeCtx::from_config(&cfg, proxy.as_deref())
+        .map_err(|e| format!("{e:#}"))
+}
+
 async fn scrape_test(
     State(state): State<AppState>,
     Json(req): Json<ScrapeTestReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let cfg = state.cfg.read().await.clone();
-    let ctx = scrape::ScrapeCtx::from_config(&cfg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("构建 HTTP 客户端失败: {e}")))?;
+    let ctx = scrape_ctx(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let metas = state.engine.scrape(&ctx, &req.number).await;
     Ok(Json(serde_json::json!({ "results": metas })))
 }
@@ -1014,9 +1029,9 @@ async fn scrape_candidates(
     State(state): State<AppState>,
     Json(req): Json<CandidatesReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let cfg = state.cfg.read().await.clone();
-    let ctx = scrape::ScrapeCtx::from_config(&cfg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("构建 HTTP 客户端失败: {e}")))?;
+    let ctx = scrape_ctx(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let list = state.engine.candidates(&ctx, &req.number).await;
     Ok(Json(serde_json::json!({
         "number": req.number,
@@ -1245,8 +1260,9 @@ async fn run_tasks(
         (_, Some(r)) => Some(PathBuf::from(r)),
         (_, None) => None,
     };
-    let ctx = scrape::ScrapeCtx::from_config(&cfg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let ctx = scrape_ctx(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     // 同步跑（规模大了再改队列）；现在先串行执行并返回处理数量
     let engine = state.engine.clone();
     let pool = state.pool.clone();

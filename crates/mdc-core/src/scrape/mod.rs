@@ -25,11 +25,18 @@ pub struct ScrapeCtx {
 }
 
 impl ScrapeCtx {
-    pub fn from_config(cfg: &AppConfig) -> Result<Self> {
+    /// `proxy`：**调用方给的有效代理**（server 传内置内核的 effective_proxy
+    /// —— 内核 Running 时是 `http://127.0.0.1:17890`）。不传才回落
+    /// `cfg.common.proxy`（手填的外部代理）。🔴 只认 common.proxy 而不看
+    /// 内核的话，内核跑起来了刮削还在直连 —— 真机截图实锤「全部 failed」。
+    pub fn from_config(cfg: &AppConfig, proxy: Option<&str>) -> Result<Self> {
+        let p = proxy
+            .map(|s| s.to_string())
+            .or_else(|| cfg.common.proxy.clone());
         // 出网统一走 net.rs：代理与「内网直连」豁免必须同一处决定
         // （代理不认识内网地址会直接回 404，douyin-nas 踩过）。
         let http = crate::net::client(crate::net::HttpOpts {
-            proxy: cfg.common.proxy.as_deref(),
+            proxy: p.as_deref(),
             no_proxy: &cfg.common.no_proxy,
             timeout_secs: cfg.common.timeout_secs,
         })?;

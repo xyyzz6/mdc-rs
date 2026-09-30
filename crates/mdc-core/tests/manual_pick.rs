@@ -98,7 +98,7 @@ async fn manual_pick_wins_and_skips_scraping() {
     cfg.save().unwrap();
 
     let cfg = AppConfig::load().unwrap();
-    let ctx = ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = ScrapeCtx::from_config(&cfg, None).unwrap();
     let pool = db::init_pool(&fx.data_dir.join("mdc.db")).await.unwrap();
 
     let calls = Arc::new(AtomicUsize::new(0));

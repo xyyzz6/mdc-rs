@@ -240,7 +240,7 @@ async fn strm_end_to_end() {
         1,
         "内置源应已被 disabled 全部关掉，只剩自定义源"
     );
-    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
     let pool = db::init_pool(&fx.data_dir.join("mdc.db")).await.unwrap();
     let runner = StrmRunner::new(fx.data_dir.join("strm_last_run"));
 
@@ -344,7 +344,7 @@ async fn custom_provider_resolves_relative_cover() {
     let mut cfg = AppConfig::default();
     cfg.scrape.disabled = vec!["javbus".into(), "fc2".into()];
     let engine = scrape::Engine::load(&cfg);
-    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
 
     let metas = engine.scrape(&ctx, "MIDV-567").await;
     assert_eq!(metas.len(), 1, "应该命中 1 条");
@@ -367,7 +367,7 @@ async fn cover_download_and_crop_work() {
     std::fs::create_dir_all(&d).unwrap();
 
     let cfg = AppConfig::default();
-    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
     let raw = d.join("cover.bmp");
     let url = format!("http://127.0.0.1:{port}/img/cover.bmp");
     mdc_core::image::download(&url, &ctx.http, &raw, None)
@@ -408,7 +408,7 @@ async fn empty_jobs_is_a_loud_error() {
     cfg.save().unwrap();
     let cfg = AppConfig::load().unwrap();
     let engine = scrape::Engine::load(&cfg);
-    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
     let pool = db::init_pool(&fx.data_dir.join("mdc.db")).await.unwrap();
     let runner = StrmRunner::new(fx.data_dir.join("strm_last_run"));
 
@@ -434,7 +434,7 @@ async fn concurrent_run_is_rejected() {
     cfg.save().unwrap();
     let cfg = AppConfig::load().unwrap();
     let engine = scrape::Engine::load(&cfg);
-    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
     let pool = db::init_pool(&fx.data_dir.join("mdc.db")).await.unwrap();
     let runner = StrmRunner::new(fx.data_dir.join("strm_last_run"));
 
@@ -467,7 +467,7 @@ async fn config_error_does_not_consume_the_schedule_slot() {
     cfg.save().unwrap();
     let cfg = AppConfig::load().unwrap();
     let engine = scrape::Engine::load(&cfg);
-    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
     let pool = db::init_pool(&fx.data_dir.join("mdc.db")).await.unwrap();
     let runner = StrmRunner::new(fx.data_dir.join("strm_last_run"));
 
@@ -498,7 +498,7 @@ fn strm_without_out_root_errors() {
     let out = rt.block_on(async {
         let pool = db::init_pool(&fx.data_dir.join("t.db")).await.unwrap();
         let engine = scrape::Engine::load(&cfg);
-        let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+        let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
         // 注意：没有 library_root
         pipeline::process_task(
             &pool,
@@ -659,7 +659,7 @@ async fn webdav_source_end_to_end() {
     let cfg = AppConfig::load().unwrap();
     assert_eq!(cfg.source.kind().unwrap(), mdc_core::source::SourceKind::WebDav);
     let engine = scrape::Engine::load(&cfg);
-    let ctx = scrape::ScrapeCtx::from_config(&cfg).unwrap();
+    let ctx = scrape::ScrapeCtx::from_config(&cfg, None).unwrap();
     let pool = db::init_pool(&fx.data_dir.join("mdc.db")).await.unwrap();
     let runner = StrmRunner::new(fx.data_dir.join("strm_last_run"));
 

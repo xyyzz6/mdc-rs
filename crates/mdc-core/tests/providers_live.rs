@@ -65,7 +65,7 @@ fn ctx() -> ScrapeCtx {
     let mut cfg = AppConfig::default();
     cfg.common.proxy = Some(proxy);
     cfg.common.timeout_secs = 30;
-    ScrapeCtx::from_config(&cfg).expect("构建 HTTP 客户端失败")
+    ScrapeCtx::from_config(&cfg, None).expect("构建 HTTP 客户端失败")
 }
 
 // ───────────────────────────── javbus ─────────────────────────────
