@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, API_BASE, getToken } from './api';
 import Artplayer from 'artplayer';
 
@@ -210,6 +210,11 @@ function App() {
   // ---------- 影视库（默认视图） ----------
   const [view, setView] = useState<'lib' | 'cfg'>('lib');
   const [libQuery, setLibQuery] = useState('');
+  // 筛选（本地维度：标签 / 演员 / 年份）与排序 —— 与后端搜索叠加使用
+  const [libTag, setLibTag] = useState('');
+  const [libActor, setLibActor] = useState('');
+  const [libYear, setLibYear] = useState('');
+  const [libSort, setLibSort] = useState<'new' | 'old' | 'number' | 'title'>('new');
   const [libItems, setLibItems] = useState<LibItem[] | null>(null);
   const [libTotal, setLibTotal] = useState(0);
   const [libLoading, setLibLoading] = useState(false);
@@ -225,6 +230,53 @@ function App() {
   const [rematchList, setRematchList] = useState<{ provider: string; status: string; error?: string; meta?: VideoMeta }[] | null>(null);
   const [rematchQuery, setRematchQuery] = useState('');
   const autoGrabbed = useRef<Set<string>>(new Set());
+
+  // 筛选选项：从当前结果集汇总（去重 + 排序），换库自动跟着变
+  const libTags = useMemo(() => {
+    const s = new Set<string>();
+    (libItems ?? []).forEach((e) => e.tags.forEach((t) => s.add(t)));
+    return [...s].sort((a, b) => a.localeCompare(b, 'ja'));
+  }, [libItems]);
+  const libActors = useMemo(() => {
+    const s = new Set<string>();
+    (libItems ?? []).forEach((e) => e.actors.forEach((a) => s.add(a)));
+    return [...s].sort((a, b) => a.localeCompare(b, 'ja'));
+  }, [libItems]);
+  const libYears = useMemo(() => {
+    const s = new Set<string>();
+    (libItems ?? []).forEach((e) => {
+      const y = (e.premiered || e.year || '').slice(0, 4);
+      if (y) s.add(y);
+    });
+    return [...s].sort().reverse();
+  }, [libItems]);
+
+  // 当前实际展示的条目 = 后端搜索结果 ∩ 三个筛选维度，再按 libSort 排序
+  const shownItems = useMemo(() => {
+    let out = (libItems ?? []).filter(
+      (e) =>
+        (!libTag || e.tags.some((t) => t === libTag)) &&
+        (!libActor || e.actors.some((a) => a === libActor)) &&
+        (!libYear || (e.premiered || e.year || '').slice(0, 4) === libYear),
+    );
+    out = [...out].sort((a, b) => {
+      switch (libSort) {
+        case 'old':
+          return (a.premiered || a.year).localeCompare(b.premiered || b.year)
+            || a.number.localeCompare(b.number);
+        case 'number':
+          return a.number.localeCompare(b.number);
+        case 'title':
+          return (a.title || a.number).localeCompare(b.title || b.number, 'ja');
+        default: // new：发行日期新→旧
+          return (b.premiered || b.year).localeCompare(a.premiered || a.year)
+            || b.number.localeCompare(a.number);
+      }
+    });
+    return out;
+  }, [libItems, libTag, libActor, libYear, libSort]);
+
+  const libFiltered = libTag || libActor || libYear;
 
   const loadLib = (query = libQuery) => {
     setLibLoading(true);
@@ -738,10 +790,35 @@ function App() {
                 onKeyDown={(e) => { if (e.key === 'Enter') loadLib(); }} />
               <button className="btn pri" onClick={() => loadLib()}>搜索</button>
             </div>
+            <div className="libfilter">
+              <select value={libTag} onChange={(e) => setLibTag(e.target.value)}>
+                <option value="">全部标签</option>
+                {libTags.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <select value={libActor} onChange={(e) => setLibActor(e.target.value)}>
+                <option value="">全部演员</option>
+                {libActors.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+              <select value={libYear} onChange={(e) => setLibYear(e.target.value)}>
+                <option value="">全部年份</option>
+                {libYears.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+              <select value={libSort} onChange={(e) => setLibSort(e.target.value as 'new' | 'old' | 'number' | 'title')}>
+                <option value="new">最新在前</option>
+                <option value="old">最早在前</option>
+                <option value="number">按番号</option>
+                <option value="title">按标题</option>
+              </select>
+              {libFiltered && (
+                <button className="btn sm" type="button"
+                  onClick={() => { setLibTag(''); setLibActor(''); setLibYear(''); }}>清空筛选</button>
+              )}
+            </div>
             <div className="countbar">
               <span className="hint" style={{ margin: 0 }}>
                 共 {libTotal} 部
-                {libItems && libTotal !== libItems.length ? ` · 筛出 ${libItems.length}` : ''}
+                {libItems && libTotal !== libItems.length ? ` · 搜索命中 ${libItems.length}` : ''}
+                {shownItems.length !== (libItems?.length ?? 0) ? ` · 筛出 ${shownItems.length}` : ''}
                 {libLoading ? ' · 读取中…' : ''}
               </span>
               <span className="sp" />
@@ -752,9 +829,11 @@ function App() {
               <div className="empty">
                 库还是空的 —— 去「设置」的网盘刮削页配好 CD2、跑一轮就有了。
               </div>
+            ) : shownItems.length === 0 ? (
+              <div className="empty">没有符合当前筛选的片子 —— 点「清空筛选」看看全部。</div>
             ) : (
               <div className="wall">
-                {(libItems ?? []).map((it) => (
+                {shownItems.map((it) => (
                   <button key={it.number} className="wcard" onClick={() => openDetail(it.number)}>
                     <div className="pwrap">
                       {it.has_poster

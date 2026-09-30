@@ -75,6 +75,10 @@ header .brand{max-width:880px;margin:0 auto}
 .dirslist{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
 .dirrow{display:flex;gap:6px;align-items:stretch}
 .dirbtn{flex:1;text-align:left;min-width:0}
+/* 影视库筛选行 */
+.libfilter{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+.libfilter select{max-width:46%;flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg);padding:8px 10px;font-size:13px}
+
 /* 详情弹窗（照 CD2 媒体库风格重做） */
 .dbox{position:relative;width:min(720px,96vw);max-height:92vh;overflow:auto;background:var(--card);border-radius:16px;padding:18px;box-shadow:0 8px 40px rgba(0,0,0,.25)}
 .dbox .sx{position:absolute;top:10px;right:10px;border:none;background:var(--chip);color:var(--fg);width:32px;height:32px;border-radius:999px;font-size:15px;cursor:pointer}
