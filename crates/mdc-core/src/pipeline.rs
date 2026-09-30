@@ -57,27 +57,37 @@ pub async fn create_tasks_for_dir(pool: &SqlitePool, dir: &Path) -> Result<usize
     Ok(n)
 }
 
-/// 无番号文件的 strm 降级生成（douyin-nas 模式）：不刮削，按源文件名写
-/// `.strm` + 合成 NFO（标题/number = 文件名，让媒体库聚合各自独立）。
-/// 落点：`<strm 根>/<网盘父目录名>/<文件名>.strm`（网盘路径拿不到就用「无番号」）。
+/// 取文件名主干（不含扩展名），降级生成时当标识用。
+fn stem_of(p: &str) -> String {
+    PathBuf::from(p)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unnamed")
+        .to_string()
+}
+
+/// strm 降级生成（douyin-nas 模式）：**刮削拿不到元数据也照样出片**。
+/// 两种调用场景：① 文件名里没有番号；② 有番号但所有源都没命中。
+/// key 是落库与文件名的依据，分别取源文件名 stem / 番号。
+/// 写 `.strm` + 合成 NFO（标题/number = key，让媒体库聚合各自独立）。
+/// 落点：`<strm 根>/<网盘父目录名>/<key>.strm`（网盘路径拿不到就用「无番号」）。
+/// 没海报 —— 前端打开详情时会自动从视频截一帧当封面。
 /// 媒体库聚合的回退链（NFO uniqueid → 文件名解析 → 父目录名）里 NFO 最优先，
 /// 每个文件的 uniqueid 都不同 ⇒ 一文件一条目，不会并成一坨。
-async fn no_number_strm(
+async fn fallback_strm(
     pool: &SqlitePool,
     task: &TaskRow,
     cfg: &AppConfig,
     library_root: Option<&Path>,
     strm_cloud: Option<&str>,
+    key: &str,
 ) -> Result<ProcessOutcome> {
     use crate::model::VideoMeta;
     let root = library_root
         .ok_or_else(|| anyhow!("strm 模式必须指定落点根目录（strm.root）"))?;
     let source = PathBuf::from(&task.source_path);
-    let stem = source
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unnamed")
-        .to_string();
+    // key 是番号或文件名 stem —— 都拿来当落库 number、文件名与标题
+    let stem = key.to_string();
     let url = match strm_cloud {
         Some(cp) => crate::cd2::build_url_from_cloud(cp, &cfg.netdisk)?,
         None => crate::cd2::build_url(&task.source_path, &cfg.netdisk)?,
@@ -115,7 +125,7 @@ async fn no_number_strm(
         None,
     )
     .await?;
-    tracing::info!(file = %stem, "无番号文件降级生成 strm（不刮削）");
+    tracing::info!(file = %stem, "降级生成 strm（不刮削）");
     Ok(ProcessOutcome {
         status: TaskStatus::Done.as_str(),
         dest: Some(dest_file),
@@ -154,7 +164,7 @@ pub async fn process_task(
             //    就是「strm 生成不了」。不刮削，按文件名直接写指针 + 合成
             //    NFO（标题=文件名），媒体库照样可看。其他模式维持跳过。
             if mode == OrganizeMode::Strm {
-                return no_number_strm(pool, task, cfg, library_root, strm_cloud).await;
+                return fallback_strm(pool, task, cfg, library_root, strm_cloud, &stem_of(&task.source_path)).await;
             }
             db::update_task(pool, task.id, TaskStatus::Failed.as_str(), None, Some("无法识别番号"))
                 .await?;
@@ -183,6 +193,17 @@ pub async fn process_task(
             match scrape_result.into_iter().next() {
                 Some(m) => m,
                 None => {
+                    // 🔴 刮削没命中也别让片子从媒体库消失（真机：不少片子各源都
+                    //    查不到）。strm 模式下降级生成：番号当标题，照旧写 .strm
+                    //    + NFO 可播；封面由前端打开时自动截一帧补上。
+                    if mode == OrganizeMode::Strm {
+                        db::update_task(pool, task.id, TaskStatus::Running.as_str(), None, None)
+                            .await?;
+                        return fallback_strm(
+                            pool, task, cfg, library_root, strm_cloud, &number,
+                        )
+                        .await;
+                    }
                     db::update_task(
                         pool,
                         task.id,

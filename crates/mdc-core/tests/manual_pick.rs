@@ -118,7 +118,9 @@ async fn manual_pick_wins_and_skips_scraping() {
         updated_at: String::new(),
     };
 
-    // ── 没有人工结果时：源挂了 ⇒ 任务必须失败 ──────────────────
+    // ── 没有人工结果时：源挂了 ⇒ strm 模式降级出片（片子不能凭空消失）──
+    //    NOTE: 这里不是 failed：刮削查不到的片子也要进媒体库（番号当标题，
+    //    封面由前端打开时截一帧补上）。桌面原地模式才真的失败（见下）。
     let out = pipeline::process_task(
         &pool,
         &engine,
@@ -131,9 +133,31 @@ async fn manual_pick_wins_and_skips_scraping() {
     )
     .await
     .unwrap();
-    assert_eq!(out.status, "failed", "源挂了就该失败：{}", out.message);
+    assert_eq!(out.status, "done", "源挂了也要降级出片：{}", out.message);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "这次确实调用了刮削");
-    assert_eq!(count_files(&fx.out_root), 0, "失败时不该留下任何产物");
+    assert!(out.dest.is_some(), "降级也要有产物（可播）");
+    let degraded = out.dest.unwrap();
+    assert!(
+        degraded.to_string_lossy().ends_with("MIDV-567.strm"),
+        "降级产物按番号命名：{degraded:?}"
+    );
+    // 非 strm 模式（桌面原地整理）没有落点概念，源挂了就该失败
+    let out_inplace = pipeline::process_task(
+        &pool,
+        &engine,
+        &ctx,
+        &cfg,
+        &task,
+        OrganizeMode::InPlace,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out_inplace.status, "failed", "原地模式源挂即失败");
+    // 清掉降级产物，后面的断言只看人工精选那次
+    let _ = std::fs::remove_file(&degraded);
+    let _ = std::fs::remove_file(degraded.with_extension("nfo"));
 
     // ── 存一条人工精选后：不该再刮削，而且要出片 ────────────────
     let manual = VideoMeta {
@@ -208,7 +232,7 @@ async fn manual_pick_wins_and_skips_scraping() {
     )
     .await
     .unwrap();
-    assert_eq!(out3.status, "failed", "取消人工后应恢复刮削并失败");
+    assert_eq!(out3.status, "done", "取消人工后恢复刮削；源挂 ⇒ 降级出片");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         before2 + 1,
