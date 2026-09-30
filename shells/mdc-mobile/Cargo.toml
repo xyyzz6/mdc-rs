@@ -1,7 +1,8 @@
 [package]
 name = "mdc-mobile"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 [lib]
 name = "mdc_mobile"
@@ -9,9 +10,19 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 同上：tauri-build 在 build-dep 图里也带 schemars@0.8.22，resolver v2 两张图
+# 特征分开解析，normal 侧的 std 强制传不到这里，必须再声明一份。
+indexmap = { version = "=1.9.3", features = ["std"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tokio = { workspace = true }
-anyhow = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
 mdc-core = { path = "../../crates/mdc-core" }
+# 安卓壳在进程内直接起引擎：复用 mdc-server 的 build_state/serve（同套路由与状态）
+mdc-server = { path = "../../crates/mdc-server" }
+# 🔧 依赖图修复：tauri 的 schemars@0.8.22（preserve_order）写的是 `IndexMap<K, V>`
+# 两参数形式，要求 indexmap@1 开 std（has_std 下 S 才有默认值）；而 serde_with 把
+# indexmap@1 关成 no_std ⇒ 编译报「expected 3 generic arguments」。在此直接依赖
+# 并带上默认 feature，cargo 特征统一会把 std 加回去。
+indexmap = { version = "=1.9.3", features = ["std"] }

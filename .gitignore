@@ -24,6 +24,21 @@ web/tsconfig.tsbuildinfo
 # 改前备份（一次性，不进版本库）
 _backup/
 
+# 安卓壳构建产物（gen/android 源码进库，构建输出与本地大文件不进）
+shells/mdc-mobile/target/
+shells/mdc-mobile/gen/android/app/build/
+shells/mdc-mobile/gen/android/.gradle/
+shells/mdc-mobile/gen/android/app/src/main/jniLibs/**/*.so
+shells/mdc-mobile/gen/android/local.properties
+
+# 本地构建的分发产物
+dist/
+tools_mumu_adb.exe
+
 # 系统
 .DS_Store
 Thumbs.db
+
+# Kotlin 编译器错误日志与机器相关生成物
+shells/mdc-mobile/gen/android/.kotlin/
+shells/mdc-mobile/gen/android/tauri.settings.gradle
