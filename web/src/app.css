@@ -96,9 +96,10 @@ header .brand{max-width:880px;margin:0 auto}
 /* 播放器顶栏右侧按钮 */
 .pbar .btn.sm{padding:4px 10px;font-size:12px}
 .pbar .prate{margin-left:auto;font-size:12px;color:var(--dim);background:var(--chip);border-radius:6px;padding:2px 8px}
-/* ArtPlayer 容器：铺满播放层剩余空间（播放器自己算宽高比） */
-.pstage{width:100%;flex:1;min-height:0;background:#000}
-.pstage .artplayer-app{width:100%;height:100%}
+/* ArtPlayer 容器：铺满播放层剩余空间，视频窗口**垂直居中**（16:9 横屏在
+   竖屏手机上不该贴在顶部） */
+.pstage{width:100%;flex:1;min-height:0;background:#000;display:flex;align-items:center;justify-content:center}
+.pstage .artplayer-app{width:100%;max-height:100%}
 .player{display:flex;flex-direction:column;height:100%}
 .hint{font-size:13px;color:var(--dim);line-height:1.6;margin:4px 0 10px}
 .hint b{color:var(--fg)}
