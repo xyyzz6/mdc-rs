@@ -141,6 +141,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/proxy/config", put(put_proxy))
         .route("/api/proxy/reload", post(proxy_reload))
         .route("/api/proxy/log", get(proxy_log))
+        // 节点选择（经 mihomo external-controller 转发）
+        .route("/api/proxy/groups", get(proxy_groups))
+        .route("/api/proxy/select", put(proxy_select))
         // 多源人工精选
         .route("/api/scrape/candidates", post(scrape_candidates))
         .route("/api/videos/manual", get(list_manual_meta))
@@ -461,6 +464,98 @@ async fn proxy_log(
         .unwrap_or(50usize)
         .min(500);
     Json(serde_json::json!({ "log": state.proxy.lock().await.log_tail(lines) }))
+}
+
+// ---------- 节点选择：转发到 mihomo external-controller ----------
+
+/// controller 只在 127.0.0.1 上听 —— 走内网直连（不进代理，也不吃 env 代理）。
+fn ctrl_client() -> Result<reqwest::Client, (StatusCode, String)> {
+    mdc_core::net::client(mdc_core::net::HttpOpts {
+        proxy: None,
+        no_proxy: &["127.0.0.1".to_string()],
+        timeout_secs: 8,
+    })
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn ctrl_base(state: &AppState) -> Result<(reqwest::Client, String, String), (StatusCode, String)> {
+    let client = ctrl_client()?;
+    let (port, secret) = state
+        .proxy
+        .lock()
+        .await
+        .controller()
+        .ok_or((StatusCode::BAD_REQUEST, "内核未运行".to_string()))?;
+    Ok((client, format!("http://127.0.0.1:{port}"), secret))
+}
+
+/// GET /api/proxy/groups —— 列出所有 Selector 分组（名称/当前选中/候选节点）。
+async fn proxy_groups(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (client, base, secret) = ctrl_base(&state).await?;
+    let v: serde_json::Value = client
+        .get(format!("{base}/proxies"))
+        .bearer_auth(&secret)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("连不上内核 controller：{e}")))?
+        .error_for_status()
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("controller 返回错误：{e}")))?
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("解析 controller 响应失败：{e}")))?;
+    let proxies = v
+        .get("proxies")
+        .and_then(|p| p.as_object())
+        .ok_or((StatusCode::BAD_GATEWAY, "controller 响应缺 proxies".to_string()))?;
+    let groups: Vec<serde_json::Value> = proxies
+        .iter()
+        .filter(|(_, info)| info.get("type").and_then(|t| t.as_str()) == Some("Selector"))
+        .map(|(name, info)| {
+            serde_json::json!({
+                "name": name,
+                "now": info.get("now"),
+                "all": info.get("all"),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "groups": groups })))
+}
+
+/// PUT /api/proxy/select {"group":"PROXY","node":"香港 01"} —— 切换分组选中节点。
+#[derive(Deserialize)]
+struct ProxySelectReq {
+    group: String,
+    node: String,
+}
+
+async fn proxy_select(
+    State(state): State<AppState>,
+    Json(req): Json<ProxySelectReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (client, base, secret) = ctrl_base(&state).await?;
+    // 分组名常带 emoji/空格，path 段手动 percent-encode
+    let mut enc = String::new();
+    for b in req.group.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                enc.push(*b as char)
+            }
+            _ => enc.push_str(&format!("%{b:02X}")),
+        }
+    }
+    let resp = client
+        .put(format!("{base}/proxies/{enc}"))
+        .bearer_auth(&secret)
+        .json(&serde_json::json!({ "name": req.node }))
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("切换节点失败：{e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("内核拒绝切换（{status}）：{body}")));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// 按当前配置拉起/停掉内核。**启动放到后台**：拉订阅 + 等端口最多十几秒，

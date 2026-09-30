@@ -1538,6 +1538,7 @@ dependencies = [
  "chrono",
  "jsonwebtoken",
  "mdc-core",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

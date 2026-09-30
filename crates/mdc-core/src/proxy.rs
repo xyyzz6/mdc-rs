@@ -24,6 +24,8 @@ use crate::config::ProxyConfig;
 
 /// 默认监听端口。刻意避开 7890 —— 本机很可能已经跑着一个 Clash，撞端口最难查。
 pub const DEFAULT_PORT: u16 = 17890;
+/// external-controller 监听端口（UI 选节点用，同样避开 Clash 惯例的 9090）。
+pub const CONTROLLER_PORT: u16 = 19091;
 /// 等内核就绪的上限。mihomo 首启要加载 geodata（低性能设备/模拟器上
 /// 实测远超 15s —— 内核日志显示还在 initial configuration 就被判死了）。
 pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -48,6 +50,9 @@ pub struct ProxyManager {
     dir: PathBuf,
     child: Option<Child>,
     phase: Phase,
+    /// external-controller 的 Bearer secret：注入配置时随机生成，
+    /// 只留在服务端（转发 API 用），**不下发前端**。
+    ctrl_secret: Option<String>,
 }
 
 impl ProxyManager {
@@ -57,6 +62,19 @@ impl ProxyManager {
             dir: dir.into(),
             child: None,
             phase: Phase::Disabled,
+            ctrl_secret: None,
+        }
+    }
+
+    /// external-controller 的 (端口, secret)。**只在内核运行中时有效**；
+    /// secret 不进 status API，只供本进程内的转发 API 使用。
+    pub fn controller(&self) -> Option<(u16, String)> {
+        match self.phase {
+            Phase::Running { .. } => self
+                .ctrl_secret
+                .as_deref()
+                .map(|s| (CONTROLLER_PORT, s.to_string())),
+            _ => None,
         }
     }
 
@@ -126,7 +144,10 @@ impl ProxyManager {
         let bin = find_kernel(&self.cfg)?;
         let sub = fetch_subscribe(url, self.cfg.external_proxy.as_deref()).await?;
         let port = self.cfg.port;
-        let text = build_kernel_config(&sub, port, self.cfg.expose_lan)?;
+        let mut secret_buf = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret_buf);
+        let secret: String = secret_buf.iter().map(|b| format!("{b:02x}")).collect();
+        let text = build_kernel_config(&sub, port, self.cfg.expose_lan, &secret)?;
 
         std::fs::create_dir_all(&self.dir)?;
         let home = self.dir.join("home");
@@ -158,6 +179,7 @@ impl ProxyManager {
             self.stop();
             bail!("内核端口 {port} 在 {}s 内没就绪。内核日志尾部：\n{tail}", READY_TIMEOUT.as_secs());
         }
+        self.ctrl_secret = Some(secret);
         self.phase = Phase::Running { port };
         Ok(())
     }
@@ -290,7 +312,12 @@ pub async fn fetch_subscribe(url: &str, bootstrap: Option<&str>) -> Result<Strin
 /// 订阅内容 → 内核配置。
 ///
 /// 只做两件事：**覆盖**我们关心的字段，其余原样保留（订阅里的节点/分组/规则不动）。
-pub fn build_kernel_config(sub: &str, port: u16, expose_lan: bool) -> Result<String> {
+pub fn build_kernel_config(
+    sub: &str,
+    port: u16,
+    expose_lan: bool,
+    controller_secret: &str,
+) -> Result<String> {
     let text = parse_subscribe(sub)?;
     let mut v: Value = serde_yaml::from_str(&text).context("订阅不是合法 YAML")?;
     let m = v
@@ -305,6 +332,14 @@ pub fn build_kernel_config(sub: &str, port: u16, expose_lan: bool) -> Result<Str
     set(m, "mixed-port", Value::Number(port.into()));
     set(m, "mode", Value::String("rule".into()));
     set(m, "log-level", Value::String("warning".into()));
+    // external-controller：UI 选节点走它（GET/PUT /proxies）。钉死端口 +
+    // 随机 secret（订阅自带的 external-controller 可能没绑密钥，裸奔在内网）。
+    set(
+        m,
+        "external-controller",
+        Value::String(format!("127.0.0.1:{CONTROLLER_PORT}")),
+    );
+    set(m, "secret", Value::String(controller_secret.into()));
     // 🔴 geodata 鸡生蛋：订阅规则全是 GEOSITE/GEOIP，mihomo 首启要去
     //    github 下载数据库 —— 而此刻代理还没起来，直连 github 必超时，
     //    内核就一直起不来。换成国内可直连的 jsdelivr 镜像，并关掉自动更新。
@@ -459,7 +494,7 @@ rules:
 
     #[test]
     fn 改写订阅时保留节点并覆盖端口() {
-        let out = build_kernel_config(SUB, 17890, false).unwrap();
+        let out = build_kernel_config(SUB, 17890, false, "testsecret").unwrap();
         assert!(out.contains("node-1"), "节点必须原样保留");
         assert!(out.contains("mixed-port: 17890"));
         assert!(out.contains("allow-lan: false"));
@@ -478,7 +513,7 @@ rules:
 
     #[test]
     fn 放开局域网时监听地址变通配() {
-        let out = build_kernel_config(SUB, 17890, true).unwrap();
+        let out = build_kernel_config(SUB, 17890, true, "testsecret").unwrap();
         assert!(out.contains("allow-lan: true"));
         assert!(out.contains("bind-address: '*'"));
     }
@@ -486,7 +521,7 @@ rules:
     #[test]
     fn 订阅里的原值会被我们的端口覆盖() {
         let with_port = format!("mixed-port: 7890\n{SUB}");
-        let out = build_kernel_config(&with_port, 17890, false).unwrap();
+        let out = build_kernel_config(&with_port, 17890, false, "testsecret").unwrap();
         let v: Value = serde_yaml::from_str(&out).unwrap();
         // 必须是我们的 17890，不是订阅里的 7890 —— 否则端口冲突
         assert_eq!(v.get("mixed-port").and_then(|x| x.as_u64()), Some(17890));
@@ -497,20 +532,20 @@ rules:
         let enc = "cHJveGllczoKICAtIG5hbWU6IG5vZGUtMQogICAgdHlwZTogc29ja3M1CiAgICBzZXJ2ZXI6IDEuMi4zLjQKICAgIHBvcnQ6IDEwODAKcHJveHktZ3JvdXBzOgogIC0gbmFtZTogUFJPWFkKICAgIHR5cGU6IHNlbGVjdAogICAgcHJveGllczogW25vZGUtMV0KcnVsZXM6CiAgLSBNQVRDSCxQUk9YWQo=";
         let dec = try_base64(enc).expect("应当能解出 base64");
         assert!(dec.contains("proxy-groups"));
-        let out = build_kernel_config(enc, 17890, false).unwrap();
+        let out = build_kernel_config(enc, 17890, false, "testsecret").unwrap();
         assert!(out.contains("mixed-port: 17890"));
     }
 
     #[test]
     fn 没有分组的订阅要早报错() {
         let bad = "proxies:\n  - name: x\n    type: socks5\n";
-        let e = build_kernel_config(bad, 17890, false).unwrap_err();
+        let e = build_kernel_config(bad, 17890, false, "testsecret").unwrap_err();
         assert!(e.to_string().contains("proxy-groups"));
     }
 
     #[test]
     fn 非_yaml_非_base64_要报错() {
-        let e = build_kernel_config("<!DOCTYPE html><html>403</html>", 17890, false).unwrap_err();
+        let e = build_kernel_config("<!DOCTYPE html><html>403</html>", 17890, false, "testsecret").unwrap_err();
         assert!(e.to_string().contains("既不是 YAML"));
     }
 

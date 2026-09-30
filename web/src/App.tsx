@@ -194,6 +194,8 @@ function App() {
 
   const [px, setPx] = useState<ProxyStatus | null>(null);
   const [pxLog, setPxLog] = useState('');
+  // 节点选择（内核 Running 时从 mihomo external-controller 拉 Selector 分组）
+  const [groups, setGroups] = useState<{ name: string; now: string; all: string[] }[] | null>(null);
 
   // 内置 CD2 引擎（APK 壳拉起，经 /api/cd2/status 代探 —— CD2 API 无 CORS）
   const [cd2, setCd2] = useState<{ alive: boolean; url: string; dav: string } | null>(null);
@@ -345,6 +347,17 @@ function App() {
     };
   }, []);
 
+  // 内核一跑起来就拉节点分组；运行状态下每 15s 刷新（订阅节点会变）
+  const phaseKey = px ? JSON.stringify(px.phase) : '';
+  useEffect(() => {
+    if (px && typeof px.phase === 'object' && 'running' in px.phase) {
+      loadGroups();
+      const t = setInterval(loadGroups, 15000);
+      return () => clearInterval(t);
+    }
+    setGroups(null);
+  }, [phaseKey]);
+
   // 切回影视库视图时刷新（刚跑完一轮刮削回来看新海报）
   const switchView = (v: 'lib' | 'cfg') => {
     setView(v);
@@ -405,6 +418,25 @@ function App() {
     api<{ alive: boolean; url: string; dav: string }>('/api/cd2/status')
       .then(setCd2)
       .catch(() => setCd2(null));
+
+  const loadGroups = () =>
+    api<{ groups: { name: string; now: string; all: string[] }[] }>('/api/proxy/groups')
+      .then((j) => setGroups(j.groups))
+      .catch(() => setGroups(null));
+
+  const selectNode = (group: string, node: string) => {
+    // 乐观更新 UI，切换失败时刷新回真实状态
+    setGroups((cur) =>
+      cur ? cur.map((g) => (g.name === group ? { ...g, now: node } : g)) : cur,
+    );
+    api('/api/proxy/select', {
+      method: 'PUT',
+      body: JSON.stringify({ group, node }),
+    })
+      .then(() => setMsg(`已切换到「${node}」`))
+      .catch((e) => setMsg(String(e)))
+      .finally(loadGroups);
+  };
 
   const loadBrowse = (dir: string) => {
     setBrowseMsg('');
@@ -635,6 +667,25 @@ function App() {
             <button className="btn" onClick={showPxLog}>看内核日志</button>
           </div>
           {pxLog && <pre>{pxLog}</pre>}
+          {px && typeof px.phase === 'object' && 'running' in px.phase && (
+            <>
+              <div className="sub" style={{ marginTop: 14 }}>节点选择（改动立即生效；只影响走代理的出网，内网永远直连）</div>
+              {!groups && <p className="hint">加载节点分组中…</p>}
+              {groups && groups.length === 0 && (
+                <p className="hint">订阅里没有可手动选择的分组（全是自动组）。</p>
+              )}
+              {groups?.map((g) => (
+                <label key={g.name} className="lbl wide">
+                  {g.name}（当前：{g.now}）
+                  <select value={g.now} onChange={(e) => selectNode(g.name, e.target.value)}>
+                    {g.all.map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </>
+          )}
         </section>
 
         <section className="card">
