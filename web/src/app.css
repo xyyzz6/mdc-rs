@@ -81,10 +81,10 @@ header .brand{max-width:880px;margin:0 auto}
 .dhead{display:flex;gap:16px;align-items:flex-start}
 .dposter{width:132px;flex:none}
 .dmain{flex:1;min-width:0}
-.dtitle{font-size:17px;font-weight:700;line-height:1.35;margin-bottom:10px}
+.dtitle{font-size:17px;font-weight:700;line-height:1.35;margin-bottom:10px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all}
 .dchips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .dchips .chip{font-size:12px;color:var(--fg);background:var(--chip);border-radius:6px;padding:3px 9px}
-.dtags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.dtags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;max-height:66px;overflow:hidden}
 .dtags .tagc{font-size:11px;color:var(--primary);background:var(--primary-dim);border-radius:999px;padding:3px 10px}
 .dfile{display:flex;align-items:center;gap:8px;background:var(--chip);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--dim);margin-bottom:10px}
 .dfile .ell{flex:1;min-width:0}

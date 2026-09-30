@@ -1145,11 +1145,15 @@ function App() {
               <div className="dmain">
                 <div className="dtitle">{detail.title}</div>
                 <div className="dchips">
-                  <span className="chip">{detail.premiered?.slice(0, 4) || detail.year || '日期未知'}</span>
+                  {(detail.premiered || detail.year) && (
+                    <span className="chip">{detail.premiered?.slice(0, 4) || detail.year}</span>
+                  )}
                   <span className="chip">{detail.number}</span>
-                  {detail.runtime_min != null && <span className="chip">{detail.runtime_min} 分钟</span>}
+                  {(detail.runtime_min ?? 0) > 0 && <span className="chip">{detail.runtime_min} 分钟</span>}
                   {detail.studio && <span className="chip">{detail.studio}</span>}
                 </div>
+                <button className="btn pri dplay" type="button"
+                  onClick={() => play(detail.number, detail.title, 0)}>▶ 播放</button>
                 {detail.tags.length > 0 && (
                   <div className="dtags">
                     {detail.tags.map((t) => <span key={t} className="chip tagc">{t}</span>)}
@@ -1171,8 +1175,6 @@ function App() {
                   const mm = Math.floor(p.pos / 60), ss = String(Math.floor(p.pos % 60)).padStart(2, '0');
                   return <div className="hint st-warn">上次看到 {mm}:{ss}（{pct}%）—— 播放会自动续播</div>;
                 })()}
-                <button className="btn pri dplay" type="button"
-                  onClick={() => play(detail.number, detail.title, 0)}>▶ 播放</button>
                 {detail.files.length > 1 && (
                   <div className="sfiles">
                     {detail.files.map((f, i) => (
@@ -1197,7 +1199,11 @@ function App() {
                     setDetail(null);
                   } catch (e) { setMsg(String(e)); }
                 }}>移出库</button>
-              <button className="btn sm" type="button" onClick={openRematch}>重新匹配</button>
+              {/* 🔴 只对「长得像番号」的条目提供重新匹配：无番号文件拿文件名
+                  去搜只会配出不相干的影片（真机截图实锤：7126895c_... 搜出 MUM-07） */}
+              {/[A-Za-z]{2,6}-?\d{2,}/.test(detail.number) && (
+                <button className="btn sm" type="button" onClick={openRematch}>重新匹配</button>
+              )}
               <button className="btn sm" type="button" onClick={() => setDetail(null)}>关闭</button>
             </div>
             {rematchOpen && (
