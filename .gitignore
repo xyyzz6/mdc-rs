@@ -35,6 +35,20 @@ shells/mdc-mobile/gen/android/local.properties
 dist/
 tools_mumu_adb.exe
 
+# ── 飞牛 fpk 包 ─────────────────────────────────────────────────────────
+# 源码是单一源：fpk/app/src 由 fpk-tools/build.sh 从仓库根同步过来（不手工维护第二份），
+# 图标与 fnpack 工具也都是构建产物 —— 全部不入库，否则改一处代码两边不同步。
+fpk/app/src/
+# fnpack 打出来的中间产物（带版本号的产物在 dist/ 下）
+fpk/picklight.fpk
+fpk/ICON.PNG
+fpk/ICON_256.PNG
+fpk/app/ui/images/
+fpk-tools/fnpack.exe
+# check_contract 的临时解包目录（跑一次上千个文件，别留着）
+_check_fpk/
+_stale/
+
 # 系统
 .DS_Store
 Thumbs.db
