@@ -343,6 +343,25 @@ impl WebDav {
         }
     }
 
+    /// 🔴 防呆：用户可能在「监控目录」里误填完整 URL（真机截图实锤：
+    /// `http://127.0.0.1:19798` 被原样当路径打 PROPFIND，得到 404 一脸懵）。
+    /// 取 URL 的 path 部分并剥掉 base 的路径前缀（/dav），规范成 WebDAV 内路径。
+    fn sanitize_dir(&self, dir: &str) -> String {
+        let d = dir.trim();
+        if d.starts_with("http://") || d.starts_with("https://") {
+            let path = url_path_of(d);
+            let bp = self.base_path.trim_end_matches('/');
+            if path == bp || path.is_empty() {
+                return "/".to_string();
+            }
+            return match path.strip_prefix(bp) {
+                Some(rest) => norm_dav_path(rest),
+                None => norm_dav_path(&path),
+            };
+        }
+        norm_dav_path(d)
+    }
+
     /// 一次 `Depth: 1` 的 PROPFIND。
     async fn propfind(&self, dir: &str) -> Result<Vec<DirEntry>> {
         // 🔴 集合（目录）的 URL **必须以 `/` 结尾** —— 这是 WebDAV 的约定，
@@ -370,7 +389,12 @@ impl WebDav {
         let status = resp.status();
         // 207 Multi-Status 是正解；部分实现用 200/201 带同样的 XML，一并认下
         if !status.is_success() && status.as_u16() != 207 {
-            return Err(anyhow!("PROPFIND {url} 返回 {status}（CD2 起来了吗？）"));
+            let hint = match status.as_u16() {
+                401 | 403 => " —— CD2 账号密码没对上：先在「内置 CD2 引擎」管理页登录，目录源里填同一组账号",
+                404 => " —— 路径不存在：确认 CD2 已挂载网盘、目录是网盘内路径（如 /115/看剧），别填网址",
+                _ => "（CD2 起来了吗？）",
+            };
+            return Err(anyhow!("PROPFIND {url} 返回 {status}{hint}"));
         }
         let body = resp.text().await.context("读 PROPFIND 响应失败")?;
         parse_multistatus(&body, &self.base_path)
@@ -389,7 +413,7 @@ impl DirSource for WebDav {
 
     async fn exists_dir(&self, dir: &str) -> Result<bool> {
         // 探不到就当不存在（上层会跳过并告警），**不把网络错误吞成「存在」**
-        Ok(self.propfind(dir).await.is_ok())
+        Ok(self.propfind(&self.sanitize_dir(dir)).await.is_ok())
     }
 
     /// 逐层 `Depth: 1` 广度优先。
@@ -397,9 +421,10 @@ impl DirSource for WebDav {
     /// 不用 `Depth: infinity`：CD2 与多数网盘 WebDAV 要么直接 403，
     /// 要么返回被截断的响应 —— 表现是「扫到一半莫名少了目录」，极难查。
     async fn list(&self, dir: &str, recursive: bool, max_depth: u32) -> Result<Vec<DirEntry>> {
+        let dir = self.sanitize_dir(dir);
         let mut out: Vec<DirEntry> = Vec::new();
         let mut queue: VecDeque<(String, u32)> = VecDeque::new();
-        queue.push_back((norm_dav_path(dir), 0));
+        queue.push_back((norm_dav_path(&dir), 0));
 
         while let Some((d, depth)) = queue.pop_front() {
             for e in self.propfind(&d).await? {
@@ -439,7 +464,7 @@ impl DirSource for WebDav {
     }
 
     async fn list_dirs(&self, dir: &str) -> Result<Vec<String>> {
-        let d = norm_dav_path(dir);
+        let d = self.sanitize_dir(dir);
         let mut out = Vec::new();
         for e in self.propfind(&d).await? {
             if e.path == d {
@@ -694,6 +719,21 @@ fn dav_path_from_href(href: &str, base_path: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn webdav监控目录误填url要规范化成内路径() {
+        let w = WebDav::new("http://127.0.0.1:19798/dav", None, None, "", reqwest::Client::new());
+        // 真机截图实锤的误填：裸 URL（无路径）→ 源根
+        assert_eq!(w.sanitize_dir("http://127.0.0.1:19798"), "/");
+        // 带 /dav 的完整 URL → 剥掉 base 前缀
+        assert_eq!(w.sanitize_dir("http://127.0.0.1:19798/dav/115/看剧"), "/115/看剧");
+        // 不带 /dav 的 URL → path 原样（已解码）
+        assert_eq!(w.sanitize_dir("http://127.0.0.1:19798/115/看剧"), "/115/看剧");
+        // 正常路径不受影响
+        assert_eq!(w.sanitize_dir("/115/看剧"), "/115/看剧");
+        assert_eq!(w.sanitize_dir("115/看剧"), "/115/看剧");
+        assert_eq!(w.sanitize_dir("/"), "/");
+    }
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mdc_src_test_{tag}_{}", std::process::id()));

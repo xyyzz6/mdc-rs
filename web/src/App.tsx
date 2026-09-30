@@ -747,10 +747,10 @@ function App() {
               <input value={intervalH} onChange={(e) => setIntervalH(e.target.value)} placeholder="0" />
             </label>
             <div className="lbl wide">
-              <span>要监控的网盘目录（一行一个）</span>
+              <span>要监控的网盘目录（一行一个{srcKind === 'webdav' ? '，填网盘内路径如 /115/看剧，别填网址' : ''}）</span>
               <button className="btn sm" style={{ marginLeft: 8 }} type="button" onClick={openBrowse}>从网盘选择</button>
               <textarea className="mono" value={jobsText} onChange={(e) => setJobsText(e.target.value)}
-                placeholder={'/mnt/clouddrive/115/看剧\n/mnt/clouddrive/115/新作'} />
+                placeholder={srcKind === 'webdav' ? '/115/看剧\n/115/新作' : '/mnt/clouddrive/115/看剧\n/mnt/clouddrive/115/新作'} />
               {browseOpen && (
                 <div className="browsecard">
                   <div className="browsecrumbs">
