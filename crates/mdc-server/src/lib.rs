@@ -152,6 +152,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/library/{number}", get(library_detail))
         .route("/api/library/{number}/poster", get(library_poster))
         .route("/api/library/{number}/play", get(library_play))
+        // 内置 CD2 引擎（APK 壳拉起，19798）状态探测：
+        // 前端 fetch 127.0.0.1:19798 是跨源（CD2 API 无 CORS 头），
+        // 必须经本端代探
+        .route("/api/cd2/status", get(cd2_status))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // login/health 公开；其余 API 过鉴权
@@ -308,6 +312,22 @@ fn parse_mode(s: &str) -> anyhow::Result<OrganizeMode> {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true, "version": VERSION }))
+}
+
+/// 内置 CD2 引擎状态（APK 壳负责拉起；桌面/Docker 端没有内置引擎，
+/// 用户可自建 —— 探测 127.0.0.1:19798 通不通即可，通就是有）。
+async fn cd2_status() -> Json<serde_json::Value> {
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        tokio::net::TcpStream::connect(("127.0.0.1", 19798)),
+    )
+    .await;
+    let alive = matches!(probe, Ok(Ok(_)));
+    Json(serde_json::json!({
+        "alive": alive,
+        "url": "http://127.0.0.1:19798",
+        "dav": "http://127.0.0.1:19798/dav",
+    }))
 }
 
 async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> Response {

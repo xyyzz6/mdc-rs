@@ -65,7 +65,10 @@ header .brand{max-width:880px;margin:0 auto}
 .tag{font-size:11px;font-weight:600;color:var(--primary);background:var(--primary-dim);border-radius:999px;padding:2px 9px}
 .tag.ok{color:var(--ok);background:var(--okbg)}
 .tag.err{color:var(--danger);background:var(--errbg)}
+.tag.warn{color:var(--warnfg);background:var(--warnbg)}
 .tag.dim{color:var(--dim);background:var(--chip)}
+/* 内置 CD2 管理页内嵌框（设置页） */
+.cd2frame{width:100%;height:420px;border:1px solid var(--line);border-radius:12px;margin-top:12px;background:#000}
 .hint{font-size:13px;color:var(--dim);line-height:1.6;margin:4px 0 10px}
 .hint b{color:var(--fg)}
 

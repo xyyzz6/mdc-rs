@@ -25,6 +25,14 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    packaging {
+        // 🔴 内置 CD2/mihomo 内核是「伪装成 .so 的可执行文件」，靠 nativeLibraryDir
+        //    execve（Android 10 W^X 下唯一可执行目录）。AGP 8+ 默认
+        //    useLegacyPackaging=false（.so 不落地，直接从 APK 映射加载）⇒
+        //    nativeLibraryDir 里根本没有文件 ⇒ exec 必败。
+        //    true = manifest 的 extractNativeLibs="true"，安装时解压落地。
+        jniLibs.useLegacyPackaging = true
+    }
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"

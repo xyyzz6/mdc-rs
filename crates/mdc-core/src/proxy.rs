@@ -24,8 +24,9 @@ use crate::config::ProxyConfig;
 
 /// 默认监听端口。刻意避开 7890 —— 本机很可能已经跑着一个 Clash，撞端口最难查。
 pub const DEFAULT_PORT: u16 = 17890;
-/// 等内核就绪的上限
-pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+/// 等内核就绪的上限。mihomo 首启要加载 geodata（低性能设备/模拟器上
+/// 实测远超 15s —— 内核日志显示还在 initial configuration 就被判死了）。
+pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// 就绪探测间隔
 pub const READY_POLL: Duration = Duration::from_millis(200);
 
@@ -270,6 +271,10 @@ pub async fn fetch_subscribe(url: &str, bootstrap: Option<&str>) -> Result<Strin
     })?;
     let resp = client
         .get(url)
+        // 🔴 机场（v2board 系）按 UA 分发格式：默认/未知 UA 常给 base64 的
+        //    v2ray 节点列表（ss:// 链接），clash 系 UA 才给 YAML —— 不带这个
+        //    头就会拿到「既不是 YAML 也不是 base64(YAML)」的内容。
+        .header("User-Agent", "clash.meta/v1.19.31")
         .send()
         .await
         .with_context(|| format!("拉订阅失败：{url}"))?

@@ -190,6 +190,10 @@ function App() {
   const [px, setPx] = useState<ProxyStatus | null>(null);
   const [pxLog, setPxLog] = useState('');
 
+  // 内置 CD2 引擎（APK 壳拉起，经 /api/cd2/status 代探 —— CD2 API 无 CORS）
+  const [cd2, setCd2] = useState<{ alive: boolean; url: string; dav: string } | null>(null);
+  const [cd2Panel, setCd2Panel] = useState(false);
+
   const [candNumber, setCandNumber] = useState('');
   const [candidates, setCandidates] = useState<Candidate[] | null>(null);
   const [manualList, setManualList] = useState<ManualItem[]>([]);
@@ -316,13 +320,23 @@ function App() {
     loadManual();
     loadProxy();
     loadLib();
+    loadCd2();
     // 定时器状态会自己变（后台在跑），轮询刷新
     const t = setInterval(loadStatus, 10000);
     // 内核是异步拉起的（拉订阅 + 等端口），启动中要多刷几次才能看到结果
     const t2 = setInterval(loadProxy, 4000);
+    // CD2 引擎首次要建库，几秒后才就绪 —— 轮询直到 alive 为止
+    const t3 = setInterval(() => {
+      setCd2((cur) => {
+        if (cur?.alive) return cur; // 已就绪就不再打（setInterval 回调里判断后由上层 clearInterval）
+        loadCd2();
+        return cur;
+      });
+    }, 6000);
     return () => {
       clearInterval(t);
       clearInterval(t2);
+      clearInterval(t3);
     };
   }, []);
 
@@ -381,6 +395,11 @@ function App() {
     api('/api/proxy/reload', { method: 'POST' })
       .then(() => { setMsg('正在重新拉起内核…'); setTimeout(loadProxy, 1500); })
       .catch((e) => setMsg(String(e)));
+
+  const loadCd2 = () =>
+    api<{ alive: boolean; url: string; dav: string }>('/api/cd2/status')
+      .then(setCd2)
+      .catch(() => setCd2(null));
 
   const showPxLog = () =>
     api<{ log: string }>('/api/proxy/log?lines=80')
@@ -489,6 +508,35 @@ function App() {
             }>解析</button>
           </div>
           {parsed && <pre>{JSON.stringify(parsed, null, 2)}</pre>}
+        </section>
+
+        <section className="card">
+          <div className="thead">内置 CD2 引擎 {cd2 && <span className={`tag ${cd2.alive ? 'ok' : 'warn'}`}>{cd2.alive ? '运行中' : '启动中…'}</span>}</div>
+          <p className="hint">
+            APK 里带着 CloudDrive2 官方安卓引擎（端口 <code>127.0.0.1:19798</code>）。
+            第一次用：先在下面的<b>管理页</b>登录 CD2 账号并挂载 115，然后回到「目录源」选
+            <b>WebDAV</b>，基址填 <code>{cd2?.dav ?? 'http://127.0.0.1:19798/dav'}</code>，
+            账号密码用同一组 CD2 账号 —— 就能直接刮网盘里的视频。
+            引擎首次启动要建库，等十几秒属正常。
+          </p>
+          {cd2?.alive && (
+            <div className="row">
+              <button className="btn pri" onClick={() => setCd2Panel((v) => !v)}>
+                {cd2Panel ? '收起管理页' : '打开 CD2 管理页'}
+              </button>
+              <button className="btn" onClick={loadCd2}>刷新状态</button>
+            </div>
+          )}
+          {cd2Panel && cd2?.alive && (
+            <iframe
+              className="cd2frame"
+              src={cd2.url}
+              title="CloudDrive2 管理页"
+            />
+          )}
+          {!cd2?.alive && (
+            <p className="hint st-warn">引擎还没就绪（或本端不是 APK 没有内置引擎）—— 桌面/Docker 用户请自行部署 CloudDrive2 后把目录源指向它的 WebDAV。</p>
+          )}
         </section>
 
         <section className="card">
