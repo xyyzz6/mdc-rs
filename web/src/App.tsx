@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, API_BASE, getToken } from './api';
+import Artplayer from 'artplayer';
 
 interface Task {
   id: number;
@@ -214,8 +215,10 @@ function App() {
   const [libLoading, setLibLoading] = useState(false);
   const [detail, setDetail] = useState<LibDetail | null>(null);
   const [playing, setPlaying] = useState<{ number: string; title: string; file: number } | null>(null);
-  // 播放器：倍速 + 进度记忆（localStorage，key=番号/file）
-  const vref = useRef<HTMLVideoElement | null>(null);
+  // 播放器：ArtPlayer（原生 controls 太素，参照胖5：倍速/比例/音轨/快捷键/
+  // 长按快进/画中画/截图/设置面板）+ 进度记忆（localStorage）
+  const pbox = useRef<HTMLDivElement | null>(null);
+  const artRef = useRef<Artplayer | null>(null);
   const [rate, setRate] = useState(1);
   // 重新匹配（详情页：调多源，选中即存人工精选 + 移出库，下轮按新元数据重建）
   const [rematchOpen, setRematchOpen] = useState(false);
@@ -488,17 +491,68 @@ function App() {
     } catch { /* ignore */ }
   };
 
-  const cycleRate = () => {
-    const next = rate === 1 ? 1.25 : rate === 1.25 ? 1.5 : rate === 1.5 ? 2 : 1;
-    setRate(next);
-    if (vref.current) vref.current.playbackRate = next;
-  };
-  const goFull = () => {
-    const v = vref.current as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
-    if (!v) return;
-    if (v.requestFullscreen) v.requestFullscreen().catch(() => {});
-    else v.webkitEnterFullscreen?.();
-  };
+  // 建播放器实例（每次换片重建）。进度记忆接在 ready / timeupdate 上。
+  useEffect(() => {
+    if (!playing || !pbox.current) return;
+    const k = progressKey(playing.number, playing.file);
+    const saved = loadProgress(k);
+    let art: Artplayer | null = null;
+    let cancelled = false;
+    art = new Artplayer({
+      container: pbox.current,
+      url: `${API_BASE}/api/library/${encodeURIComponent(playing.number)}/play?file=${playing.file}${mediaQuery().replace('?', '&')}`,
+      poster: detail?.poster ? `${API_BASE}/api/library/${encodeURIComponent(playing.number)}/poster${mediaQuery()}` : '',
+      type: 'mp4',
+      autoplay: true,
+      autoSize: true,
+      autoMini: true,
+      mutex: true,
+      playsInline: true,
+      theme: '#007aff',
+      lang: 'zh-cn',
+      // 胖5 那套能力能对上的全开：倍速 / 画面比例 / 设置面板 / 快捷键 /
+      // 长按 2x 快进 / 画中画 / 截图 / 全屏（网页全屏 + 原生全屏）
+      playbackRate: true,
+      aspectRatio: true,
+      setting: true,
+      hotkey: true,
+      fastForward: true,
+      pip: true,
+      screenshot: true,
+      fullscreen: true,
+      fullscreenWeb: true,
+      lock: true,
+      miniProgressBar: true,
+      // 右键菜单只留版本号说明，长按快进由 fastForward 接管
+      contextmenu: [],
+    });
+    artRef.current = art;
+    art.on('ready', () => {
+      if (!art || cancelled) return;
+      art.playbackRate = rate;
+      if (saved && saved.pos > 5 && saved.dur && saved.pos < saved.dur - 15) {
+        art.currentTime = saved.pos;
+        const mm = Math.floor(saved.pos / 60);
+        const ss = String(Math.floor(saved.pos % 60)).padStart(2, '0');
+        art.notice.show = `已续播到 ${mm}:${ss}`;
+      }
+    });
+    art.on('video:timeupdate', () => {
+      if (!art) return;
+      const d = art.duration || 0;
+      if (d > 0) saveProgress(k, art.currentTime, d);
+    });
+    art.on('video:ratechange', () => {
+      if (art) setRate(art.playbackRate);
+    });
+    art.on('video:ended', () => clearProgress(k));
+    return () => {
+      cancelled = true;
+      try { art?.destroy(false); } catch { /* ignore */ }
+      artRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing]);
 
   // ---------- 重新匹配（详情页：多源查询 → 采用人工精选 → 移出库待重建） ----------
   // ---------- 从视频截一帧当封面（刮削没海报时的兜底） ----------
@@ -1293,29 +1347,9 @@ function App() {
               {playing.title}
               {detail && detail.files[playing.file] ? ` · ${detail.files[playing.file].name}` : ''}
             </span>
-            <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-              <button className="btn sm" onClick={cycleRate}>{rate}x</button>
-              <button className="btn sm" onClick={goFull}>全屏</button>
-            </span>
+            <span className="prate">{rate}x</span>
           </div>
-          <video
-            ref={vref}
-            key={`${playing.number}-${playing.file}`}
-            controls autoPlay playsInline
-            onLoadedMetadata={(e) => {
-              const k = progressKey(playing.number, playing.file);
-              const p = loadProgress(k);
-              const v = e.currentTarget;
-              if (p && p.pos > 5 && p.dur && p.pos < p.dur - 15) v.currentTime = p.pos;
-              v.playbackRate = rate;
-            }}
-            onTimeUpdate={(e) => {
-              const v = e.currentTarget;
-              if (v.duration) saveProgress(progressKey(playing.number, playing.file), v.currentTime, v.duration);
-            }}
-            onEnded={() => clearProgress(progressKey(playing.number, playing.file))}
-            src={`${API_BASE}/api/library/${encodeURIComponent(playing.number)}/play?file=${playing.file}${mediaQuery().replace('?', '&')}`}
-          />
+          <div ref={pbox} className="pstage" />
         </div>
       )}
     </>
