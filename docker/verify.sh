@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 在 NAS 上验证 mdc-rs 的 Docker 镜像**能不能真跑起来**。
+# 在 NAS 上验证 picklight 的 Docker 镜像**能不能真跑起来**。
 #
-#   bash docker/verify.sh                 # 构建并验证（镜像名 mdc-rs:verify）
-#   bash docker/verify.sh mdc-rs:latest   # 换镜像名
+#   bash docker/verify.sh                 # 构建并验证（镜像名 picklight:verify）
+#   bash docker/verify.sh picklight:latest   # 换镜像名
 #   MDC_VERIFY_PORT=19208 bash docker/verify.sh
 #   DOCKER="sudo docker" bash docker/verify.sh     # docker 需要 sudo 时
 #
@@ -16,13 +16,13 @@
 
 set -u
 
-IMAGE="${1:-mdc-rs:verify}"
+IMAGE="${1:-picklight:verify}"
 DOCKER="${DOCKER:-docker}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 WORK="$(mktemp -d)"
 PORT="${MDC_VERIFY_PORT:-19208}"
-CONTAINER="mdc-rs-verify-$$"
+CONTAINER="picklight-verify-$$"
 FAIL=0
 
 ok()   { printf '  \033[32m✅\033[0m %s\n' "$1"; }
