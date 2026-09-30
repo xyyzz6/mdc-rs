@@ -626,7 +626,7 @@ function App() {
     try {
       await api(`/api/videos/${encodeURIComponent(meta.number)}/meta`, {
         method: 'PUT',
-        body: JSON.stringify(meta),
+        body: JSON.stringify({ meta }),
       });
       await api(`/api/library/${encodeURIComponent(detail.number)}`, { method: 'DELETE' });
       setMsg(`已采用「${meta.number}」——点「保存并生成 strm」按新元数据重建`);
