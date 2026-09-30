@@ -1,10 +1,18 @@
 const TOKEN_KEY = 'mdc_token';
 
 // 桌面/Docker：前端由服务端同端口伺服，相对路径即可。
-// APK：WebView 加载的是内嵌前端（tauri:// 或 http://tauri.localhost 源），
-// API 在进程内 127.0.0.1:9208，必须打绝对地址（服务端已放行该来源的 CORS）。
+// Tauri 壳（桌面 exe / 安卓 APK）：页面源是 tauri://localhost 或
+// http(s)://tauri.localhost —— 注意 tauri.localhost 的协议就是 'http:'，
+// 只看 protocol 会误判成同源、把 /api 打进静态资源处理器（404）。
+// 壳内必须打绝对地址，引擎在进程内 127.0.0.1:9208（服务端已放行该来源的 CORS）。
+const IN_TAURI =
+  typeof window !== 'undefined' &&
+  ('__TAURI_INTERNALS__' in window ||
+    location.hostname === 'tauri.localhost' ||
+    location.protocol === 'tauri:');
+
 export const API_BASE =
-  location.protocol === 'http:' || location.protocol === 'https:'
+  !IN_TAURI && (location.protocol === 'http:' || location.protocol === 'https:')
     ? ''
     : 'http://127.0.0.1:9208';
 

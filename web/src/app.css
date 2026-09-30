@@ -1,0 +1,160 @@
+/* ============================================================
+   MDC-RS 前端设计体系 —— 移植自 cigpricer（烟价速查）的 iOS 风格
+   令牌：--bg #f2f2f7 / --card #fff / --primary #007aff / --chip #e9e9eb
+   卡片 14px 圆角 + 弱阴影；胶囊 radius 999；focus 蓝色光圈；暗色全套。
+   注意：不用 color-mix（MuMu WebView 版本不可控），顶栏用 rgba 变量。
+   ============================================================ */
+:root{
+  --bg:#f2f2f7; --card:#ffffff; --fg:#1c1c1e; --dim:#8e8e93; --line:rgba(60,60,67,.29);
+  --primary:#007aff; --primary-dim:rgba(0,122,255,.10); --chip:#e9e9eb;
+  --danger:#ff3b30; --ok:#34c759; --amber:#ff9500;
+  --okbg:rgba(52,199,89,.12);   --okln:rgba(52,199,89,.40);
+  --errbg:rgba(255,59,48,.10);  --errln:rgba(255,59,48,.35);
+  --warnbg:rgba(255,149,0,.14); --warnln:rgba(255,149,0,.40); --warnfg:#9a6a00;
+  --headbg:rgba(242,242,247,.82);
+  --ios-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#000000; --card:#1c1c1e; --fg:#ffffff; --dim:#98989f; --line:rgba(84,84,88,.65);
+    --primary:#0a84ff; --primary-dim:rgba(10,132,255,.18); --chip:#2c2c2e;
+    --danger:#ff453a; --ok:#30d158; --amber:#ffd60a;
+    --okbg:rgba(48,209,88,.18);   --okln:rgba(48,209,88,.50);
+    --errbg:rgba(255,69,58,.16);  --errln:rgba(255,69,58,.50);
+    --warnbg:rgba(255,159,10,.18);--warnln:rgba(255,159,10,.45); --warnfg:#ffd60a;
+    --headbg:rgba(0,0,0,.78);
+  }
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.5 var(--ios-font);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  padding-bottom:48px;
+}
+.wrap{max-width:880px;margin:0 auto;padding:0 16px}
+
+/* ---------- 顶栏（iOS 大标题 + 毛玻璃） ---------- */
+header{
+  position:sticky;top:0;z-index:20;
+  background:var(--headbg);
+  backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);
+  padding:14px 16px 10px;
+  border-bottom:1px solid var(--line);
+}
+header .brand{max-width:880px;margin:0 auto}
+.brand h1{margin:0;font-size:30px;font-weight:700;letter-spacing:-.5px;display:flex;align-items:center;gap:10px}
+.brand .sub{font-size:13px;color:var(--dim);margin-top:2px}
+.ver{font-size:11px;font-weight:600;color:var(--primary);background:var(--primary-dim);border-radius:999px;padding:2px 9px;white-space:nowrap}
+
+/* ---------- 全局消息横幅 ---------- */
+.banner{display:none;font-size:13px;line-height:1.65;border-radius:12px;padding:11px 13px;margin:14px 0 -2px;word-break:break-all}
+.banner.on{display:block}
+.banner.ok{background:var(--okbg);border:1px solid var(--okln)}
+.banner.err{background:var(--errbg);border:1px solid var(--errln)}
+.banner.info{background:var(--warnbg);border:1px solid var(--warnln)}
+
+/* ---------- 卡片 ---------- */
+.card{
+  background:var(--card);border-radius:14px;padding:16px;margin:14px 0;
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px -16px rgba(0,0,0,.3);
+}
+.thead{font-size:19px;font-weight:700;letter-spacing:-.2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px}
+.tag{font-size:11px;font-weight:600;color:var(--primary);background:var(--primary-dim);border-radius:999px;padding:2px 9px}
+.tag.ok{color:var(--ok);background:var(--okbg)}
+.tag.err{color:var(--danger);background:var(--errbg)}
+.tag.dim{color:var(--dim);background:var(--chip)}
+.hint{font-size:13px;color:var(--dim);line-height:1.6;margin:4px 0 10px}
+.hint b{color:var(--fg)}
+
+/* ---------- 行与按钮 ---------- */
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}
+.btn{
+  font-family:inherit;font-size:14px;font-weight:600;cursor:pointer;
+  border:0;background:var(--chip);color:var(--fg);
+  padding:9px 15px;border-radius:10px;white-space:nowrap;
+}
+.btn:active{opacity:.7}
+.btn.pri{background:var(--primary);color:#fff}
+.btn.danger{background:var(--errbg);color:var(--danger)}
+.btn.sm{padding:5px 12px;font-size:13px;border-radius:9px}
+.tbtn{border:0;background:transparent;color:var(--primary);font-family:inherit;font-size:13.5px;font-weight:500;padding:6px 10px;border-radius:8px;cursor:pointer;white-space:nowrap}
+.tbtn:active{background:var(--chip)}
+.tbtn.danger{color:var(--danger)}
+
+/* ---------- 表单 ---------- */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px 14px;margin-top:12px}
+.lbl{font-size:12.5px;font-weight:500;color:var(--dim);display:block}
+.lbl.wide{grid-column:1 / -1}
+.lbl.check{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--fg);font-weight:400;padding-top:4px}
+input,select,textarea{
+  font-family:inherit;font-size:16px;color:var(--fg);
+  background:var(--bg);border:1px solid var(--line);border-radius:10px;
+  padding:10px 12px;outline:0;width:100%;margin-top:6px;
+}
+.lbl.check input{width:18px;height:18px;margin:0;accent-color:var(--primary);flex:none}
+input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-dim)}
+input::placeholder,textarea::placeholder{color:var(--dim)}
+textarea.mono{font-family:var(--mono);font-size:12.5px;height:76px;resize:vertical}
+.inline-input{margin-top:0}
+
+/* ---------- 状态与键值行 ---------- */
+.kv{font-size:13px;line-height:1.9;margin:10px 0 0}
+.kv b{font-weight:600}
+.pill{font-size:11px;font-weight:600;border-radius:999px;padding:2px 9px;white-space:nowrap;display:inline-block}
+.pill.ok{color:var(--ok);background:var(--okbg)}
+.pill.err{color:var(--danger);background:var(--errbg)}
+.pill.warn{color:var(--warnfg);background:var(--warnbg)}
+.pill.dim{color:var(--dim);background:var(--chip)}
+.st-ok{color:var(--ok)} .st-err{color:var(--danger)} .st-warn{color:var(--warnfg)}
+
+/* ---------- 表格 ---------- */
+.tblwrap{overflow-x:auto;margin-top:10px;-webkit-overflow-scrolling:touch}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{
+  text-align:left;font-size:12px;font-weight:600;color:var(--dim);
+  padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;
+}
+.tbl td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+.tbl tr:last-child td{border-bottom:0}
+.ell{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---------- 代码 / 预览块 ---------- */
+code{background:var(--chip);padding:1px 5px;border-radius:5px;font-size:12px;font-family:var(--mono);word-break:break-all}
+pre{
+  background:var(--chip);padding:10px 12px;border-radius:10px;margin:10px 0 0;
+  font-size:12px;font-family:var(--mono);white-space:pre-wrap;word-break:break-all;
+  overflow-x:auto;max-height:320px;
+}
+
+/* ---------- 多源人工精选候选卡 ---------- */
+.cand{background:var(--bg);border-radius:12px;padding:12px;margin-top:10px}
+.chead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.chead .cl{font-size:14px;font-weight:600}
+.chead .prov{font-size:11px;color:var(--dim);font-family:var(--mono)}
+.chead .take{margin-left:auto}
+.cbody{display:flex;gap:12px;margin-top:10px}
+.cover{width:72px;height:108px;border-radius:8px;object-fit:cover;flex:none;background:var(--chip)}
+.cmeta{font-size:12.5px;line-height:1.7;min-width:0}
+.cmeta .dim2{color:var(--dim)}
+.cmeta .site{color:var(--dim);opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---------- 已保存的人工精选行 ---------- */
+.mrow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+.mrow:last-child{border-bottom:0}
+.mrow .mnum{font-size:14px;font-weight:600;white-space:nowrap}
+.mrow .mttl{flex:1;min-width:0;font-size:12.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mhead{font-size:13px;color:var(--dim);margin:14px 0 2px}
+.mhead b{color:var(--fg)}
+
+/* ---------- 任务状态 ---------- */
+.empty{font-size:13px;color:var(--dim);text-align:center;padding:18px 0}
+footer{max-width:880px;margin:0 auto;padding:6px 18px 0;font-size:12px;color:var(--dim);text-align:center}
+
+@media (max-width:560px){
+  .brand h1{font-size:25px}
+  .card{padding:14px}
+  .ell{max-width:150px}
+}

@@ -42,3 +42,6 @@ Thumbs.db
 # Kotlin 编译器错误日志与机器相关生成物
 shells/mdc-mobile/gen/android/.kotlin/
 shells/mdc-mobile/gen/android/tauri.settings.gradle
+
+# tauri 构建时生成的能力 schema（可随时再生）
+shells/mdc-mobile/gen/schemas/

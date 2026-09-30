@@ -120,6 +120,13 @@ interface ProxyStatus {
   kernel_found: boolean;
 }
 
+// 全局消息横幅的配色分类：错误红 / 进行中琥珀 / 其余绿
+const bannerKind = (m: string): 'ok' | 'err' | 'info' => {
+  if (/error|失败|错误|不可用|不可写|算不出|拒绝|denied|failed/i.test(m)) return 'err';
+  if (/^正在|正在|稍候|稍后/.test(m)) return 'info';
+  return 'ok';
+};
+
 function App() {
   const [version, setVersion] = useState('');
   const [filename, setFilename] = useState('');
@@ -221,8 +228,26 @@ function App() {
       .catch((e) => { setProbe(null); setProbeMsg(String(e)); });
   };
 
+  // 版本号：引擎是异步拉起的（APK 上前端先起、后端后起），
+  // 拉不到就每 2s 重试，最多 30 次 —— 修掉旧版「启动太早永远显示 v?」的问题。
   useEffect(() => {
-    api<{ version: string }>('/api/health').then((j) => setVersion(j.version)).catch(() => setVersion('?'));
+    let alive = true;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      api<{ version: string }>('/api/health')
+        .then((j) => { if (alive) setVersion(j.version); })
+        .catch(() => {
+          if (!alive) return;
+          tries += 1;
+          if (tries <= 30) timer = setTimeout(tick, 2000);
+        });
+    };
+    tick();
+    return () => { alive = false; clearTimeout(timer); };
+  }, []);
+
+  useEffect(() => {
     refresh();
     loadNetdisk();
     loadStatus();
@@ -297,435 +322,424 @@ function App() {
     // 后端 serde 用了 snake_case，无参变体是小写裸字符串
     if (p === 'disabled') return '未启用';
     if (p === 'starting') return '正在启动…';
-    if (typeof p === 'object' && 'running' in p) return `运行中（端口 ${p.running.port}）`;
+    if (typeof p === 'object' && 'running' in p) return `运行中 · 端口 ${p.running.port}`;
     if (typeof p === 'object' && 'failed' in p) return `失败：${p.failed.reason}`;
     return String(p);
   };
 
-  const phaseColor = (p: ProxyPhase): string => {
-    if (typeof p === 'object' && 'running' in p) return '#2a7';
-    if (typeof p === 'object' && 'failed' in p) return '#c00';
-    if (p === 'starting') return '#c60';
-    return '#666';
+  const phasePill = (p: ProxyPhase): string => {
+    if (typeof p === 'object' && 'running' in p) return 'pill ok';
+    if (typeof p === 'object' && 'failed' in p) return 'pill err';
+    if (p === 'starting') return 'pill warn';
+    return 'pill dim';
   };
 
   const fmtTime = (t: number | null) =>
     t ? new Date(t * 1000).toLocaleString() : '—';
 
+  const candPill = (s: Candidate['status']): string =>
+    s === 'hit' ? 'pill ok' : s === 'failed' ? 'pill err' : 'pill dim';
+  const candPillText = (s: Candidate['status']): string =>
+    s === 'hit' ? '命中' : s === 'skipped' ? '不处理此形态' : '未命中';
+
   return (
-    <div style={{ maxWidth: 860, margin: '0 auto', padding: 24, fontFamily: 'system-ui' }}>
-      <h1>MDC-RS <small style={{ color: '#888' }}>v{version}</small></h1>
-
-      <section style={card}>
-        <h3>番号解析测试</h3>
-        <div style={row}>
-          <input style={input} value={filename} placeholder="例如: [FANZA] MIDV-567 1080p.mp4"
-            onChange={(e) => setFilename(e.target.value)} />
-          <button style={btn} onClick={() =>
-            api<Record<string, unknown>>('/api/parse', { method: 'POST', body: JSON.stringify({ filename }) })
-              .then(setParsed).catch((e) => setMsg(String(e)))
-          }>解析</button>
+    <>
+      <header>
+        <div className="brand">
+          <h1>MDC-RS {version && <span className="ver">v{version}</span>}</h1>
+          <div className="sub">115 网盘刮削 · .strm 生成 · 内置代理内核</div>
         </div>
-        {parsed && <pre style={pre}>{JSON.stringify(parsed, null, 2)}</pre>}
-      </section>
+      </header>
 
-      <section style={card}>
-        <h3>内置代理内核</h3>
-        <p style={hint}>
-          刮削站在国内直连不通，所以软件自带内核：填你自己的订阅链接，由软件拉起内核，
-          刮削与海报下载全走它，而<b>内网（CD2 / Emby / NAS）永远直连</b>，不会被代理劫持。
-          内核二进制不随源码分发 —— 找不到就按提示放一个，或改用「外部代理」。
-        </p>
+      <div className="wrap">
+        {msg && <div className={`banner on ${bannerKind(msg)}`}>{msg}</div>}
 
-        {px && (
-          <>
-            <p style={{ fontSize: 13 }}>
-              状态：<b style={{ color: phaseColor(px.phase) }}>{phaseText(px.phase)}</b>
-              {' · '}实际出网：<code>{px.effective_proxy ?? '直连（无代理）'}</code>
-              {' · '}内核二进制：
-              <b style={{ color: px.kernel_found ? '#2a7' : '#c00' }}>{px.kernel_found ? '已找到' : '未找到'}</b>
-            </p>
+        <section className="card">
+          <div className="thead">番号解析测试</div>
+          <p className="hint">输入一个文件名，看看引擎从里面认出了什么（番号、前后缀、清晰度…）。</p>
+          <div className="row" style={{ marginTop: 0 }}>
+            <input className="inline-input" style={{ flex: 1, minWidth: 200 }} value={filename}
+              placeholder="例如: [FANZA] MIDV-567 1080p.mp4"
+              onChange={(e) => setFilename(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter')
+                  api<Record<string, unknown>>('/api/parse', { method: 'POST', body: JSON.stringify({ filename }) })
+                    .then(setParsed).catch((e) => setMsg(String(e)));
+              }} />
+            <button className="btn pri" onClick={() =>
+              api<Record<string, unknown>>('/api/parse', { method: 'POST', body: JSON.stringify({ filename }) })
+                .then(setParsed).catch((e) => setMsg(String(e)))
+            }>解析</button>
+          </div>
+          {parsed && <pre>{JSON.stringify(parsed, null, 2)}</pre>}
+        </section>
 
-            {!px.kernel_found && (
-              <p style={{ fontSize: 12, color: '#c00' }}>
-                把 <code>mihomo</code> 放到程序同目录，或在下面填「内核路径」。
-                没有内核时请先关闭开关、改填「外部代理」。
-              </p>
-            )}
+        <section className="card">
+          <div className="thead">内置代理内核 {px && <span className={phasePill(px.phase)}>{phaseText(px.phase)}</span>}</div>
+          <p className="hint">
+            刮削站在国内直连不通，所以软件自带内核：填你自己的订阅链接，由软件拉起内核，
+            刮削与海报下载全走它，而<b>内网（CD2 / Emby / NAS）永远直连</b>，不会被代理劫持。
+            内核二进制不随源码分发 —— 找不到就按提示放一个，或改用「外部代理」。
+          </p>
 
-            <div style={grid}>
-              <label style={{ ...lbl, gridColumn: '1 / -1' }}>订阅链接（只填你自己的，软件不预置任何节点）
-                <input style={input} value={px.proxy.subscribe_url ?? ''} placeholder="https://..."
-                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, subscribe_url: e.target.value || null } })} />
-              </label>
-              <label style={lbl}>内核
-                <select style={input} value={px.proxy.kernel}
-                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel: e.target.value } })}>
-                  <option value="mihomo">mihomo（Clash.Meta，推荐）</option>
-                  <option value="sing-box">sing-box（尚未实现）</option>
-                </select>
-              </label>
-              <label style={lbl}>监听端口
-                <input style={input} type="number" value={px.proxy.port}
-                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, port: Number(e.target.value) || 17890 } })} />
-              </label>
-              <label style={lbl}>外部代理（内核没起来时回落）
-                <input style={input} value={px.proxy.external_proxy ?? ''} placeholder="http://127.0.0.1:7890"
-                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, external_proxy: e.target.value || null } })} />
-              </label>
-              <label style={lbl}>内核路径（留空自动探测）
-                <input style={input} value={px.proxy.kernel_path ?? ''} placeholder="C:\...\mihomo.exe"
-                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel_path: e.target.value || null } })} />
-              </label>
-              <label style={{ ...lbl, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <input type="checkbox" checked={px.proxy.expose_lan}
-                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, expose_lan: e.target.checked } })} />
-                放开到局域网（让 Emby / CD2 共用；默认只本机）
-              </label>
-              <label style={{ ...lbl, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <input type="checkbox" checked={px.proxy.enabled}
-                  onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, enabled: e.target.checked } })} />
-                启用内置内核
-              </label>
-            </div>
-          </>
-        )}
-
-        <div style={row}>
-          <button style={btn} onClick={() => saveProxy()}>保存</button>
-          <button style={btn} onClick={() => saveProxy(true)}>保存并启动</button>
-          <button style={btn} onClick={() => saveProxy(false)}>停用</button>
-          <button style={btn} onClick={reloadProxy}>重新拉起</button>
-          <button style={btn} onClick={showPxLog}>看内核日志</button>
-        </div>
-        {pxLog && <pre style={pre}>{pxLog}</pre>}
-      </section>
-
-      <section style={card}>
-        <h3>目录源（网盘从哪读）</h3>
-        <p style={hint}>
-          桌面 / Docker / NAS 上 CloudDrive2 能把 115 挂成<b>本机目录</b>，选「本地挂载」即可；
-          <b>安卓没有挂载</b>（系统不给 FUSE），只能走 CD2 的 WebDAV —— 选「WebDAV」，
-          此时「要监控的网盘目录」填<b>网盘内路径</b>（如 <code>/115/看剧</code>）。
-        </p>
-
-        <div style={grid}>
-          <label style={lbl}>目录源类型
-            <select style={input} value={srcKind} onChange={(e) => setSrcKind(e.target.value)}>
-              <option value="local">本地挂载（用下面的 CD2 挂载根）</option>
-              <option value="webdav">WebDAV（CD2 /dav，安卓必选）</option>
-            </select>
-          </label>
-          {srcKind === 'webdav' && (
+          {px && (
             <>
-              <label style={lbl}>WebDAV 基址
-                <input style={input} value={srcBase} onChange={(e) => setSrcBase(e.target.value)}
-                  placeholder="http://127.0.0.1:19798/dav" />
-              </label>
-              <label style={lbl}>用户名（可留空）
-                <input style={input} value={srcUser} onChange={(e) => setSrcUser(e.target.value)} />
-              </label>
-              <label style={lbl}>密码（可留空）
-                <input style={input} type="password" value={srcPass} onChange={(e) => setSrcPass(e.target.value)} />
-              </label>
-              <label style={lbl}>网盘路径前缀（一般留空）
-                <input style={input} value={srcPrefix} onChange={(e) => setSrcPrefix(e.target.value)}
-                  placeholder="115open" />
-              </label>
-              <label style={lbl}>超时（秒）
-                <input style={input} value={srcTimeout} onChange={(e) => setSrcTimeout(e.target.value)} />
-              </label>
+              <p className="kv">
+                实际出网：<code>{px.effective_proxy ?? '直连（无代理）'}</code>
+              </p>
+              <p className="kv" style={{ marginTop: -4 }}>
+                内核二进制：
+                <span className={`pill ${px.kernel_found ? 'ok' : 'err'}`}>{px.kernel_found ? '已找到' : '未找到'}</span>
+              </p>
+
+              {!px.kernel_found && (
+                <p className="hint st-err">
+                  把 <code>mihomo</code> 放到程序同目录，或在下面填「内核路径」。
+                  没有内核时请先关闭开关、改填「外部代理」。
+                </p>
+              )}
+
+              <div className="grid">
+                <label className="lbl wide">订阅链接（只填你自己的，软件不预置任何节点）
+                  <input value={px.proxy.subscribe_url ?? ''} placeholder="https://..."
+                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, subscribe_url: e.target.value || null } })} />
+                </label>
+                <label className="lbl">内核
+                  <select value={px.proxy.kernel}
+                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel: e.target.value } })}>
+                    <option value="mihomo">mihomo（Clash.Meta，推荐）</option>
+                    <option value="sing-box">sing-box（尚未实现）</option>
+                  </select>
+                </label>
+                <label className="lbl">监听端口
+                  <input type="number" value={px.proxy.port}
+                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, port: Number(e.target.value) || 17890 } })} />
+                </label>
+                <label className="lbl">外部代理（内核没起来时回落）
+                  <input value={px.proxy.external_proxy ?? ''} placeholder="http://127.0.0.1:7890"
+                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, external_proxy: e.target.value || null } })} />
+                </label>
+                <label className="lbl">内核路径（留空自动探测）
+                  <input value={px.proxy.kernel_path ?? ''} placeholder="C:\...\mihomo.exe"
+                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel_path: e.target.value || null } })} />
+                </label>
+                <label className="lbl check wide">
+                  <input type="checkbox" checked={px.proxy.expose_lan}
+                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, expose_lan: e.target.checked } })} />
+                  放开到局域网（让 Emby / CD2 共用；默认只本机）
+                </label>
+                <label className="lbl check wide">
+                  <input type="checkbox" checked={px.proxy.enabled}
+                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, enabled: e.target.checked } })} />
+                  启用内置内核
+                </label>
+              </div>
             </>
           )}
-        </div>
 
-        {nd && (
-          <p style={{ fontSize: 13 }}>
-            当前源：
-            <b style={{ color: nd.source_ok ? '#2a7' : '#c00' }}>{nd.source_ok ? nd.source_kind : '配置不完整'}</b>
-            {nd.source_root ? <> · <code>{nd.source_root}</code></> : null}
-            {srcKind === 'webdav' && <> · 内网请求<b>不走代理</b></>}
+          <div className="row">
+            <button className="btn pri" onClick={() => saveProxy(true)}>保存并启动</button>
+            <button className="btn" onClick={() => saveProxy()}>保存</button>
+            <button className="btn danger" onClick={() => saveProxy(false)}>停用</button>
+            <button className="btn" onClick={reloadProxy}>重新拉起</button>
+            <button className="btn" onClick={showPxLog}>看内核日志</button>
+          </div>
+          {pxLog && <pre>{pxLog}</pre>}
+        </section>
+
+        <section className="card">
+          <div className="thead">目录源 {nd && <span className={`tag ${nd.source_ok ? 'ok' : 'err'}`}>{nd.source_ok ? (nd.source_kind ?? 'ok') : '配置不完整'}</span>}</div>
+          <p className="hint">
+            桌面 / Docker / NAS 上 CloudDrive2 能把 115 挂成<b>本机目录</b>，选「本地挂载」即可；
+            <b>安卓没有挂载</b>（系统不给 FUSE），只能走 CD2 的 WebDAV —— 选「WebDAV」，
+            此时「要监控的网盘目录」填<b>网盘内路径</b>（如 <code>/115/看剧</code>）。
           </p>
-        )}
 
-        <div style={row}>
-          <button style={btn} onClick={saveNetdisk}>保存</button>
-          <button style={btn} onClick={probeSource}>试连（列出源根）</button>
-        </div>
+          <div className="grid">
+            <label className="lbl wide">目录源类型
+              <select value={srcKind} onChange={(e) => setSrcKind(e.target.value)}>
+                <option value="local">本地挂载（用下面的 CD2 挂载根）</option>
+                <option value="webdav">WebDAV（CD2 /dav，安卓必选）</option>
+              </select>
+            </label>
+            {srcKind === 'webdav' && (
+              <>
+                <label className="lbl">WebDAV 基址
+                  <input value={srcBase} onChange={(e) => setSrcBase(e.target.value)}
+                    placeholder="http://127.0.0.1:19798/dav" />
+                </label>
+                <label className="lbl">用户名（可留空）
+                  <input value={srcUser} onChange={(e) => setSrcUser(e.target.value)} />
+                </label>
+                <label className="lbl">密码（可留空）
+                  <input type="password" value={srcPass} onChange={(e) => setSrcPass(e.target.value)} />
+                </label>
+                <label className="lbl">网盘路径前缀（一般留空）
+                  <input value={srcPrefix} onChange={(e) => setSrcPrefix(e.target.value)}
+                    placeholder="115open" />
+                </label>
+                <label className="lbl">超时（秒）
+                  <input value={srcTimeout} onChange={(e) => setSrcTimeout(e.target.value)} />
+                </label>
+              </>
+            )}
+          </div>
 
-        {probeMsg && <p style={{ fontSize: 12, color: '#c00' }}>{probeMsg}</p>}
-        {probe && (
-          <div style={{ fontSize: 12, marginTop: 8 }}>
-            <p>
-              <code>{probe.dir}</code> 下扫到 <b>{probe.total}</b> 个视频（试连只看一层，前 10 条）
+          {nd && (
+            <p className="kv">
+              当前源：<b className={nd.source_ok ? 'st-ok' : 'st-err'}>{nd.source_ok ? nd.source_kind : '配置不完整'}</b>
+              {nd.source_root ? <> · <code>{nd.source_root}</code></> : null}
+              {srcKind === 'webdav' && <> · 内网请求<b>不走代理</b></>}
             </p>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead><tr><th>文件</th><th>网盘路径</th><th>直链</th></tr></thead>
-              <tbody>
-                {probe.sample.map((p, i) => (
-                  <tr key={i}>
-                    <td style={ellipsis}>{p.name}</td>
-                    <td style={ellipsis}>{p.cloud_path ?? '—'}</td>
-                    <td style={{ ...ellipsis, color: p.url ? '#2a7' : '#c00' }}>{p.url ?? '算不出'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          )}
+
+          <div className="row">
+            <button className="btn pri" onClick={saveNetdisk}>保存</button>
+            <button className="btn" onClick={probeSource}>试连（列出源根）</button>
           </div>
-        )}
-      </section>
 
-      <section style={card}>
-        <h3>网盘刮削（CD2 挂载 → .strm）</h3>
-        <p style={hint}>
-          视频一个字节都不搬：只往输出目录写几十字节的 .strm 指针 + NFO + 海报，
-          Emby / Jellyfin 扫这个目录即可。已生成的会按增量清单跳过，不重刮、不打网盘。
-        </p>
+          {probeMsg && <p className="hint st-err" style={{ marginTop: 10 }}>{probeMsg}</p>}
+          {probe && (
+            <>
+              <p className="kv">
+                <code>{probe.dir}</code> 下扫到 <b>{probe.total}</b> 个视频（试连只看一层，前 10 条）
+              </p>
+              <div className="tblwrap">
+                <table className="tbl">
+                  <thead><tr><th>文件</th><th>网盘路径</th><th>直链</th></tr></thead>
+                  <tbody>
+                    {probe.sample.map((p, i) => (
+                      <tr key={i}>
+                        <td className="ell">{p.name}</td>
+                        <td className="ell">{p.cloud_path ?? '—'}</td>
+                        <td className={`ell ${p.url ? 'st-ok' : 'st-err'}`}>{p.url ?? '算不出'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </section>
 
-        {nd && (
-          <p style={{ fontSize: 13 }}>
-            挂载根：
-            <b style={{ color: nd.mount_ok ? '#2a7' : '#c00' }}>{nd.mount_ok ? '已挂载' : '不可用'}</b>
-            {' · '}输出目录：
-            <b style={{ color: nd.out_writable ? '#2a7' : '#c00' }}>{nd.out_writable ? '可写' : '不可写'}</b>
-            {' · '}落点：<code>{nd.strm_root}</code>
+        <section className="card">
+          <div className="thead">网盘刮削 {nd && <span className={`tag ${nd.mount_ok && nd.out_writable ? 'ok' : 'err'}`}>{nd.mount_ok ? '挂载正常' : '挂载不可用'}</span>}</div>
+          <p className="hint">
+            视频一个字节都不搬：只往输出目录写几十字节的 .strm 指针 + NFO + 海报，
+            Emby / Jellyfin 扫这个目录即可。已生成的会按增量清单跳过，不重刮、不打网盘。
           </p>
-        )}
 
-        <div style={grid}>
-          <label style={lbl}>CD2 地址
-            <input style={input} value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.15" />
-          </label>
-          <label style={lbl}>端口
-            <input style={input} value={port} onChange={(e) => setPort(e.target.value)} />
-          </label>
-          <label style={lbl}>CD2 挂载根（本机绝对路径）
-            <input style={input} value={mountRoot} onChange={(e) => setMountRoot(e.target.value)} placeholder="/mnt/clouddrive" />
-          </label>
-          <label style={lbl}>网盘路径前缀（可留空）
-            <input style={input} value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="115" />
-          </label>
-          <label style={{ ...lbl, gridColumn: '1 / -1' }}>.strm 输出目录（Emby 扫这里）
-            <input style={input} value={strmRoot} onChange={(e) => setStrmRoot(e.target.value)} placeholder="留空 = <数据目录>/strm" />
-          </label>
-          <label style={lbl}>自动运行间隔（小时，0 = 只手动）
-            <input style={input} value={intervalH} onChange={(e) => setIntervalH(e.target.value)} placeholder="0" />
-          </label>
-          <label style={{ ...lbl, gridColumn: '1 / -1' }}>要监控的网盘目录（一行一个）
-            <textarea style={{ ...input, height: 76, fontFamily: 'monospace', fontSize: 12 }}
-              value={jobsText} onChange={(e) => setJobsText(e.target.value)}
-              placeholder={'/mnt/clouddrive/115/看剧\n/mnt/clouddrive/115/新作'} />
-          </label>
-        </div>
+          {nd && (
+            <p className="kv">
+              挂载根：<b className={nd.mount_ok ? 'st-ok' : 'st-err'}>{nd.mount_ok ? '已挂载' : '不可用'}</b>
+              {' · '}输出目录：<b className={nd.out_writable ? 'st-ok' : 'st-err'}>{nd.out_writable ? '可写' : '不可写'}</b>
+              <br />落点：<code>{nd.strm_root}</code>
+            </p>
+          )}
 
-        {status && (
-          <p style={{ fontSize: 12, color: '#555' }}>
-            {status.running && <b style={{ color: '#c60' }}>正在运行 · </b>}
-            已生成 <b>{status.generated}</b> 个（清单记录 {status.manifest_entries} 条）
-            {' · '}上次运行 {fmtTime(status.last_run)}
-            {status.interval_hours > 0
-              ? <> {' · '}下次 {fmtTime(status.next_run)}</>
-              : <> {' · '}未开启定时</>}
-          </p>
-        )}
-
-        {nd && nd.jobs.length > 0 && (
-          <p style={{ fontSize: 12, color: '#888' }}>
-            {nd.jobs.map((j, i) => (
-              <span key={i} style={{ marginRight: 12 }}>
-                {j.exists ? '✅' : '❌'} <code>{j.dir}</code>
-              </span>
-            ))}
-          </p>
-        )}
-
-        <div style={row}>
-          <button style={btn} onClick={saveNetdisk}>保存</button>
-          <button style={btn} onClick={() =>
-            api<StrmScan>('/api/strm/scan', { method: 'POST', body: '{}' })
-              .then((s) => { setScan(s); setMsg(''); })
-              .catch((e) => setMsg(String(e)))
-          }>扫描预览</button>
-          <button style={btn} onClick={() => runStrm(false)}>运行一轮</button>
-          <button style={btn} onClick={() => runStrm(true)}>强制全量重写</button>
-        </div>
-
-        {scan && (
-          <div style={{ fontSize: 12, marginTop: 10 }}>
-            <p>共 <b>{scan.total}</b> 个可识别视频{scan.unparseable > 0 && `，另有 ${scan.unparseable} 个文件名识别不出番号`}</p>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead><tr><th>番号</th><th>源文件</th><th>直链</th></tr></thead>
-              <tbody>
-                {scan.preview.map((p, i) => (
-                  <tr key={i}>
-                    <td style={{ whiteSpace: 'nowrap', paddingRight: 8 }}>{p.number}</td>
-                    <td style={ellipsis}>{p.source}</td>
-                    <td style={{ ...ellipsis, color: p.url_ok ? '#2a7' : '#c00' }}>
-                      {p.url_ok ? p.url : '算不出（不在挂载根下）'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="grid">
+            <label className="lbl">CD2 地址
+              <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.15" />
+            </label>
+            <label className="lbl">端口
+              <input value={port} onChange={(e) => setPort(e.target.value)} />
+            </label>
+            <label className="lbl">CD2 挂载根（本机绝对路径）
+              <input value={mountRoot} onChange={(e) => setMountRoot(e.target.value)} placeholder="/mnt/clouddrive" />
+            </label>
+            <label className="lbl">网盘路径前缀（可留空）
+              <input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="115" />
+            </label>
+            <label className="lbl wide">.strm 输出目录（Emby 扫这里）
+              <input value={strmRoot} onChange={(e) => setStrmRoot(e.target.value)} placeholder="留空 = <数据目录>/strm" />
+            </label>
+            <label className="lbl">自动运行间隔（小时，0 = 只手动）
+              <input value={intervalH} onChange={(e) => setIntervalH(e.target.value)} placeholder="0" />
+            </label>
+            <label className="lbl wide">要监控的网盘目录（一行一个）
+              <textarea className="mono" value={jobsText} onChange={(e) => setJobsText(e.target.value)}
+                placeholder={'/mnt/clouddrive/115/看剧\n/mnt/clouddrive/115/新作'} />
+            </label>
           </div>
-        )}
 
-        {stats && (
-          <p style={{ fontSize: 13, marginTop: 10 }}>
-            共 {stats.total} · <b style={{ color: '#2a7' }}>新增 {stats.added}</b>
-            {' · '}增量跳过 {stats.skipped}
-            {stats.failed > 0 && <b style={{ color: '#c00' }}> · 失败 {stats.failed}</b>}
-            {stats.errors.length > 0 && <pre style={pre}>{stats.errors.join('\n')}</pre>}
+          {status && (
+            <p className="kv">
+              {status.running && <span className="pill warn" style={{ marginRight: 6 }}>正在运行</span>}
+              已生成 <b>{status.generated}</b> 个（清单记录 {status.manifest_entries} 条）
+              {' · '}上次运行 {fmtTime(status.last_run)}
+              {status.interval_hours > 0
+                ? <> {' · '}下次 {fmtTime(status.next_run)}</>
+                : <> {' · '}未开启定时</>}
+            </p>
+          )}
+
+          {nd && nd.jobs.length > 0 && (
+            <p className="kv" style={{ color: 'var(--dim)', fontSize: 12 }}>
+              {nd.jobs.map((j, i) => (
+                <span key={i} style={{ marginRight: 12 }}>
+                  <span className={`pill ${j.exists ? 'ok' : 'err'}`}>{j.exists ? '✓' : '✗'}</span> <code>{j.dir}</code>
+                </span>
+              ))}
+            </p>
+          )}
+
+          <div className="row">
+            <button className="btn pri" onClick={() => runStrm(false)}>运行一轮</button>
+            <button className="btn" onClick={saveNetdisk}>保存</button>
+            <button className="btn" onClick={() =>
+              api<StrmScan>('/api/strm/scan', { method: 'POST', body: '{}' })
+                .then((s) => { setScan(s); setMsg(''); })
+                .catch((e) => setMsg(String(e)))
+            }>扫描预览</button>
+            <button className="btn danger" onClick={() => runStrm(true)}>强制全量重写</button>
+          </div>
+
+          {scan && (
+            <>
+              <p className="kv">
+                共 <b>{scan.total}</b> 个可识别视频{scan.unparseable > 0 && `，另有 ${scan.unparseable} 个文件名识别不出番号`}
+              </p>
+              <div className="tblwrap">
+                <table className="tbl">
+                  <thead><tr><th>番号</th><th>源文件</th><th>直链</th></tr></thead>
+                  <tbody>
+                    {scan.preview.map((p, i) => (
+                      <tr key={i}>
+                        <td style={{ whiteSpace: 'nowrap' }}>{p.number}</td>
+                        <td className="ell">{p.source}</td>
+                        <td className={`ell ${p.url_ok ? 'st-ok' : 'st-err'}`}>
+                          {p.url_ok ? p.url : '算不出（不在挂载根下）'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {stats && (
+            <p className="kv">
+              共 {stats.total} · <b className="st-ok">新增 {stats.added}</b>
+              {' · '}增量跳过 {stats.skipped}
+              {stats.failed > 0 && <b className="st-err"> · 失败 {stats.failed}</b>}
+              {stats.errors.length > 0 && <pre>{stats.errors.join('\n')}</pre>}
+            </p>
+          )}
+        </section>
+
+        <section className="card">
+          <div className="thead">多源人工精选 {manualList.length > 0 && <span className="tag">{manualList.length} 条已保存</span>}</div>
+          <p className="hint">
+            各源结果<b>不合并</b>、原样列出，你挑一条。挑过之后这个番号处理时直接用它、
+            不再刮削 —— 源站全挂或谁都搜不到时，这样也能出片。
           </p>
-        )}
-      </section>
+          <div className="row" style={{ marginTop: 0 }}>
+            <input className="inline-input" style={{ flex: 1, minWidth: 200 }} value={candNumber}
+              placeholder="番号，如 MIDV-567 / FC2-PPV-4680562 / 080918_002"
+              onChange={(e) => setCandNumber(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') loadCandidates(); }} />
+            <button className="btn pri" onClick={loadCandidates}>拉取各源结果</button>
+          </div>
 
-      <section style={card}>
-        <h3>多源人工精选</h3>
-        <p style={hint}>
-          各源结果<b>不合并</b>、原样列出，你挑一条。挑过之后这个番号处理时直接用它、
-          不再刮削 —— 源站全挂或谁都搜不到时，这样也能出片。
-        </p>
-        <div style={row}>
-          <input style={input} value={candNumber} placeholder="番号，如 MIDV-567 / FC2-PPV-4680562 / 080918_002"
-            onChange={(e) => setCandNumber(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') loadCandidates(); }} />
-          <button style={btn} onClick={loadCandidates}>拉取各源结果</button>
-        </div>
+          {candMsg && <p className="hint" style={{ marginTop: 10 }}>{candMsg}</p>}
 
-        {candidates && (
-          <div style={{ marginTop: 10 }}>
-            {candidates.map((c) => (
-              <div key={c.provider} style={candCard}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <b style={{ fontSize: 13 }}>{c.label}</b>
-                  <code style={{ fontSize: 11, color: '#888' }}>{c.provider}</code>
-                  <span style={{
-                    fontSize: 11, padding: '1px 6px', borderRadius: 4,
-                    background: c.status === 'hit' ? '#EAF3DE' : c.status === 'skipped' ? '#F1EFE8' : '#FCEBEB',
-                    color: c.status === 'hit' ? '#173404' : c.status === 'skipped' ? '#2C2C2A' : '#501313',
-                  }}>
-                    {c.status === 'hit' ? '命中' : c.status === 'skipped' ? '不处理此形态' : '未命中'}
-                  </span>
-                  {c.status === 'hit' && c.meta && (
-                    <button style={{ ...btn, padding: '2px 10px', marginLeft: 'auto' }}
-                      onClick={() => useCandidate(c.meta!)}>用这条</button>
-                  )}
-                </div>
-
-                {c.status === 'failed' && c.error && (
-                  <pre style={{ ...pre, marginTop: 6 }}>{c.error}</pre>
-                )}
+          {candidates && candidates.map((c) => (
+            <div key={c.provider} className="cand">
+              <div className="chead">
+                <span className="cl">{c.label}</span>
+                <span className="prov">{c.provider}</span>
+                <span className={candPill(c.status)}>{candPillText(c.status)}</span>
                 {c.status === 'hit' && c.meta && (
-                  <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-                    {c.meta.cover_url && (
-                      <img src={c.meta.cover_url} alt="" referrerPolicy="no-referrer"
-                        style={{ width: 66, height: 99, objectFit: 'cover', borderRadius: 4, flex: 'none', background: '#eee' }} />
-                    )}
-                    <div style={{ fontSize: 12, lineHeight: 1.7, minWidth: 0 }}>
-                      <div style={{ wordBreak: 'break-word' }}>{c.meta.title ?? '（无标题）'}</div>
-                      <div style={{ color: '#666' }}>
-                        {c.meta.actors.length > 0 && <>演员：{c.meta.actors.join('、')}　</>}
-                        {c.meta.runtime_min != null && <>{c.meta.runtime_min} 分钟　</>}
-                        {c.meta.release_date && <>{c.meta.release_date}　</>}
-                        {c.meta.studio && <>制作商：{c.meta.studio}　</>}
-                        {c.meta.uncensored && <>无码　</>}
-                      </div>
-                      {c.meta.tags.length > 0 && (
-                        <div style={{ color: '#888' }}>标签：{c.meta.tags.join('、')}</div>
-                      )}
-                      {c.meta.website && (
-                        <div style={{ color: '#aaa', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {c.meta.website}
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  <button className="btn sm pri take" onClick={() => useCandidate(c.meta!)}>用这条</button>
                 )}
               </div>
-            ))}
+
+              {c.status === 'failed' && c.error && <pre>{c.error}</pre>}
+              {c.status === 'hit' && c.meta && (
+                <div className="cbody">
+                  {c.meta.cover_url && (
+                    <img className="cover" src={c.meta.cover_url} alt="" referrerPolicy="no-referrer" />
+                  )}
+                  <div className="cmeta">
+                    <div style={{ wordBreak: 'break-word', fontWeight: 500 }}>{c.meta.title ?? '（无标题）'}</div>
+                    <div className="dim2">
+                      {c.meta.actors.length > 0 && <>演员：{c.meta.actors.join('、')}　</>}
+                      {c.meta.runtime_min != null && <>{c.meta.runtime_min} 分钟　</>}
+                      {c.meta.release_date && <>{c.meta.release_date}　</>}
+                      {c.meta.studio && <>制作商：{c.meta.studio}　</>}
+                      {c.meta.uncensored && <>无码　</>}
+                    </div>
+                    {c.meta.tags.length > 0 && (
+                      <div className="dim2">标签：{c.meta.tags.join('、')}</div>
+                    )}
+                    {c.meta.website && (
+                      <div className="site">{c.meta.website}</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+
+          {manualList.length > 0 && (
+            <>
+              <div className="mhead"><b>已保存的人工精选（{manualList.length}）</b> —— 这些番号处理时不再刮削</div>
+              {manualList.map((m) => (
+                <div key={m.number} className="mrow">
+                  <span className="mnum">{m.number}</span>
+                  <span className="mttl">{m.title ?? '-'}</span>
+                  <button className="tbtn danger" onClick={() => clearManual(m.number)}>取消</button>
+                </div>
+              ))}
+            </>
+          )}
+        </section>
+
+        <section className="card">
+          <div className="thead">扫描目录（本地）</div>
+          <div className="row" style={{ marginTop: 0 }}>
+            <input className="inline-input" style={{ flex: 1, minWidth: 200 }} value={dir} placeholder="视频目录绝对路径"
+              onChange={(e) => setDir(e.target.value)} />
+            <button className="btn pri" onClick={() =>
+              api<{ created: number }>('/api/tasks', { method: 'POST', body: JSON.stringify({ dir }) })
+                .then((j) => { setMsg(`创建 ${j.created} 条任务`); refresh(); })
+                .catch((e) => setMsg(String(e)))
+            }>创建任务</button>
+            <button className="btn" onClick={() =>
+              api<{ processed: number }>('/api/tasks/run', { method: 'POST', body: JSON.stringify({ mode: 'hard_link' }) })
+                .then((j) => { setMsg(`处理 ${j.processed} 条`); refresh(); })
+                .catch((e) => setMsg(String(e)))
+            }>运行（硬链整理）</button>
           </div>
-        )}
+        </section>
 
-        {manualList.length > 0 && (
-          <div style={{ marginTop: 12, fontSize: 12 }}>
-            <b>已保存的人工精选（{manualList.length}）</b>
-            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6 }}>
-              <tbody>
-                {manualList.map((m) => (
-                  <tr key={m.number}>
-                    <td style={{ whiteSpace: 'nowrap', paddingRight: 8 }}>{m.number}</td>
-                    <td style={{ maxWidth: 380, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {m.title ?? '-'}
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      <button style={{ ...btn, padding: '1px 8px', fontSize: 11 }}
-                        onClick={() => clearManual(m.number)}>取消</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <section className="card">
+          <div className="thead">任务列表 {tasks.length > 0 && <span className="tag">{tasks.length}</span>}</div>
+          {tasks.length === 0 ? (
+            <div className="empty">还没有任务 —— 在上面填个目录、点「创建任务」。</div>
+          ) : (
+            <div className="tblwrap">
+              <table className="tbl">
+                <thead><tr><th>ID</th><th>番号</th><th>状态</th><th>源文件</th><th>错误</th></tr></thead>
+                <tbody>
+                  {tasks.map((t) => (
+                    <tr key={t.id}>
+                      <td>{t.id}</td><td>{t.number ?? '-'}</td><td>{t.status}</td>
+                      <td className="ell">{t.source_path}</td>
+                      <td className="st-err" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.error ?? ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
-        {candMsg && <p style={{ fontSize: 12, color: '#c60', marginTop: 8 }}>{candMsg}</p>}
-      </section>
-
-      <section style={card}>
-        <h3>扫描目录（本地）</h3>
-        <div style={row}>
-          <input style={input} value={dir} placeholder="视频目录绝对路径"
-            onChange={(e) => setDir(e.target.value)} />
-          <button style={btn} onClick={() =>
-            api<{ created: number }>('/api/tasks', { method: 'POST', body: JSON.stringify({ dir }) })
-              .then((j) => { setMsg(`创建 ${j.created} 条任务`); refresh(); })
-              .catch((e) => setMsg(String(e)))
-          }>创建任务</button>
-          <button style={btn} onClick={() =>
-            api<{ processed: number }>('/api/tasks/run', { method: 'POST', body: JSON.stringify({ mode: 'hard_link' }) })
-              .then((j) => { setMsg(`处理 ${j.processed} 条`); refresh(); })
-              .catch((e) => setMsg(String(e)))
-          }>运行（硬链整理）</button>
-        </div>
-      </section>
-
-      {msg && <p style={{ color: '#c60' }}>{msg}</p>}
-
-      <section style={card}>
-        <h3>任务列表</h3>
-        <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-          <thead><tr><th>ID</th><th>番号</th><th>状态</th><th>源文件</th><th>错误</th></tr></thead>
-          <tbody>
-            {tasks.map((t) => (
-              <tr key={t.id}>
-                <td>{t.id}</td><td>{t.number ?? '-'}</td><td>{t.status}</td>
-                <td style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.source_path}</td>
-                <td style={{ color: '#c00' }}>{t.error ?? ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </div>
+        <footer>视频不搬动，只生成 .strm 指针 —— 网盘里的文件留在网盘里。</footer>
+      </div>
+    </>
   );
 }
-
-const card: React.CSSProperties = {
-  background: '#fafafa', border: '1px solid #e5e5e5', borderRadius: 8,
-  padding: 16, marginBottom: 16,
-};
-const row: React.CSSProperties = { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 };
-const input: React.CSSProperties = { flex: 1, padding: '6px 10px', border: '1px solid #ccc', borderRadius: 6, width: '100%', boxSizing: 'border-box' };
-const btn: React.CSSProperties = { padding: '6px 14px', cursor: 'pointer', border: '1px solid #888', borderRadius: 6, background: '#fff' };
-const pre: React.CSSProperties = { background: '#f0f0f0', padding: 10, borderRadius: 6, fontSize: 12, whiteSpace: 'pre-wrap' };
-const hint: React.CSSProperties = { fontSize: 12, color: '#888', margin: '4px 0 10px' };
-const grid: React.CSSProperties = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 };
-const lbl: React.CSSProperties = { fontSize: 12, color: '#555', display: 'block' };
-const ellipsis: React.CSSProperties = { maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
-const candCard: React.CSSProperties = {
-  border: '1px solid #e5e5e5', borderRadius: 8, padding: '10px 12px',
-  marginBottom: 8, background: '#fff',
-};
 
 export default App;
