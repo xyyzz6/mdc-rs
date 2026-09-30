@@ -223,6 +223,7 @@ function App() {
   // 重新匹配（详情页：调多源，选中即存人工精选 + 移出库，下轮按新元数据重建）
   const [rematchOpen, setRematchOpen] = useState(false);
   const [rematchList, setRematchList] = useState<{ provider: string; status: string; error?: string; meta?: VideoMeta }[] | null>(null);
+  const [rematchQuery, setRematchQuery] = useState('');
   const autoGrabbed = useRef<Set<string>>(new Set());
 
   const loadLib = (query = libQuery) => {
@@ -610,21 +611,28 @@ function App() {
     }
   };
 
-  const openRematch = () => {
-    if (!detail) return;
-    setRematchOpen(true);
+  const runRematch = (number: string) => {
+    if (!number.trim()) return;
     setRematchList(null);
     api<{ candidates: { provider: string; status: string; error?: string; meta?: VideoMeta }[] }>(
       '/api/scrape/candidates',
-      { method: 'POST', body: JSON.stringify({ number: detail.number }) },
+      { method: 'POST', body: JSON.stringify({ number: number.trim() }) },
     )
       .then((j) => setRematchList(j.candidates))
       .catch((e) => { setRematchList([]); setMsg(String(e)); });
   };
+  const openRematch = () => {
+    if (!detail) return;
+    setRematchOpen(true);
+    setRematchQuery(detail.number);
+    runRematch(detail.number);
+  };
   const adoptMeta = async (meta: VideoMeta) => {
     if (!detail) return;
     try {
-      await api(`/api/videos/${encodeURIComponent(meta.number)}/meta`, {
+      // 🔴 key 必须是**原条目的番号**：下一轮重建时按源文件解析出来的还是它，
+      //    get_manual_meta(原番号) 才能命中；meta 内容用查到的正确番号。
+      await api(`/api/videos/${encodeURIComponent(detail.number)}/meta`, {
         method: 'PUT',
         body: JSON.stringify({ meta }),
       });
@@ -1329,8 +1337,23 @@ function App() {
             </div>
             {rematchOpen && (
               <div className="rematch">
-                {!rematchList && <p className="hint">正在向各刮削源查询「{detail.number}」…</p>}
-                {rematchList && rematchList.length === 0 && <p className="hint">所有源都没查到（试试换节点）。</p>}
+                <div className="dirrow">
+                  <input
+                    className="rinput"
+                    value={rematchQuery}
+                    placeholder="输入正确番号（如 ABP-123 / FC2-PPV-3141592）"
+                    onChange={(e) => setRematchQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') runRematch(rematchQuery); }}
+                  />
+                  <button className="btn sm pri" type="button"
+                    onClick={() => runRematch(rematchQuery)}>查询</button>
+                </div>
+                <p className="hint">
+                  番号猜错很常见（文件名里的编号不是真番号）—— 手动填正确番号查询，
+                  命中后点「采用」，再生成一轮就按新元数据重建。
+                </p>
+                {!rematchList && <p className="hint">正在查询「{rematchQuery || detail.number}」…</p>}
+                {rematchList && rematchList.length === 0 && <p className="hint">所有源都没查到（试试换节点或核对番号）。</p>}
                 {rematchList?.map((c) => (
                   <div key={c.provider} className="dirrow">
                     <span className="ell" style={{ flex: 1 }}>
