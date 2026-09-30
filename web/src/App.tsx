@@ -46,6 +46,7 @@ interface StrmStatus {
   manifest_entries: number;
   generated: number;
   out_root: string;
+  last_stats?: string | null;
 }
 
 interface VideoMeta {
@@ -76,14 +77,6 @@ interface ManualItem {
   title: string | null;
 }
 
-interface StrmStats {
-  total: number;
-  added: number;
-  skipped: number;
-  failed: number;
-  out_root: string;
-  errors: string[];
-}
 
 interface StrmScan {
   total: number;
@@ -180,7 +173,6 @@ function App() {
   const [jobsText, setJobsText] = useState('');
   const [intervalH, setIntervalH] = useState('0');
   const [status, setStatus] = useState<StrmStatus | null>(null);
-  const [stats, setStats] = useState<StrmStats | null>(null);
   const [scan, setScan] = useState<StrmScan | null>(null);
 
   // 目录源：网盘是挂成本机目录（local）还是走 WebDAV（webdav —— 安卓唯一可行）
@@ -416,10 +408,24 @@ function App() {
   };
 
   const runStrm = (force: boolean) => {
-    setMsg('正在扫描网盘并刮削…（首次会比较慢）');
-    api<StrmStats>('/api/strm/run', { method: 'POST', body: JSON.stringify({ force }) })
-      .then((s) => { setStats(s); setMsg(''); refresh(); loadStatus(); })
-      .catch((e) => { setMsg(String(e)); loadStatus(); });
+    // 后台任务：启动即返回，轮询 status 直到 running=false（长请求在手机上会被掐断）
+    setMsg(force ? '已启动强制全量重写…（进度看下方状态行）' : '已启动：正在扫描网盘并刮削…（进度看下方状态行）');
+    api('/api/strm/run', { method: 'POST', body: JSON.stringify({ force }) })
+      .then(() => {
+        const t = setInterval(() => {
+          loadStatus();
+          api<StrmStatus>('/api/strm/status')
+            .then((s) => {
+              if (!s.running) {
+                clearInterval(t);
+                setMsg('');
+                loadLib();
+              }
+            })
+            .catch(() => clearInterval(t));
+        }, 5000);
+      })
+      .catch((e) => setMsg(String(e)));
   };
 
   const loadProxy = () => api<ProxyStatus>('/api/proxy/status').then(setPx).catch(() => {});
@@ -883,6 +889,19 @@ function App() {
                 : <> {' · '}未开启定时</>}
             </p>
           )}
+          {status?.last_stats && !status.running && (() => {
+            try {
+              const s = JSON.parse(status.last_stats!) as { added: number; failed: number; skipped: number; errors: string[] };
+              return (
+                <p className="hint">
+                  上轮结果：新增 {s.added} · 失败 {s.failed} · 跳过 {s.skipped}
+                  {s.errors?.length ? <> —— 最近一条：<span className="st-err">{s.errors[0]}</span></> : null}
+                </p>
+              );
+            } catch {
+              return <p className="hint st-err">{status.last_stats}</p>;
+            }
+          })()}
 
           {nd && nd.jobs.length > 0 && (
             <p className="kv" style={{ color: 'var(--dim)', fontSize: 12 }}>
@@ -927,15 +946,6 @@ function App() {
                 </table>
               </div>
             </>
-          )}
-
-          {stats && (
-            <p className="kv">
-              共 {stats.total} · <b className="st-ok">新增 {stats.added}</b>
-              {' · '}增量跳过 {stats.skipped}
-              {stats.failed > 0 && <b className="st-err"> · 失败 {stats.failed}</b>}
-              {stats.errors.length > 0 && <pre>{stats.errors.join('\n')}</pre>}
-            </p>
           )}
         </section>
 

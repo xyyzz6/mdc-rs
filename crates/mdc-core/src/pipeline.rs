@@ -57,6 +57,72 @@ pub async fn create_tasks_for_dir(pool: &SqlitePool, dir: &Path) -> Result<usize
     Ok(n)
 }
 
+/// 无番号文件的 strm 降级生成（douyin-nas 模式）：不刮削，按源文件名写
+/// `.strm` + 合成 NFO（标题/number = 文件名，让媒体库聚合各自独立）。
+/// 落点：`<strm 根>/<网盘父目录名>/<文件名>.strm`（网盘路径拿不到就用「无番号」）。
+/// 媒体库聚合的回退链（NFO uniqueid → 文件名解析 → 父目录名）里 NFO 最优先，
+/// 每个文件的 uniqueid 都不同 ⇒ 一文件一条目，不会并成一坨。
+async fn no_number_strm(
+    pool: &SqlitePool,
+    task: &TaskRow,
+    cfg: &AppConfig,
+    library_root: Option<&Path>,
+    strm_cloud: Option<&str>,
+) -> Result<ProcessOutcome> {
+    use crate::model::VideoMeta;
+    let root = library_root
+        .ok_or_else(|| anyhow!("strm 模式必须指定落点根目录（strm.root）"))?;
+    let source = PathBuf::from(&task.source_path);
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unnamed")
+        .to_string();
+    let url = match strm_cloud {
+        Some(cp) => crate::cd2::build_url_from_cloud(cp, &cfg.netdisk)?,
+        None => crate::cd2::build_url(&task.source_path, &cfg.netdisk)?,
+    };
+    // 网盘父目录名做子目录（/115open/云下载/x.mp4 → 云下载/）
+    let sub = strm_cloud
+        .and_then(|cp| {
+            crate::source::norm_dav_path(cp)
+                .trim_end_matches('/')
+                .rsplit('/')
+                .nth(1)
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "无番号".to_string());
+    let dest_dir = root.join(&sub);
+    std::fs::create_dir_all(&dest_dir)?;
+    let dest_file = dest_dir.join(format!("{stem}.strm"));
+    crate::strm::write_strm(&dest_file, &url, cfg.strm.bom)?;
+
+    // 合成 NFO：标题 = 文件名（number 也是它 —— XML 转义 write_nfo 内部已处理）
+    let meta = VideoMeta {
+        number: stem.clone(),
+        title: Some(stem.clone()),
+        ..Default::default()
+    };
+    let _ = crate::nfo::write_nfo_alongside(&meta, &dest_file);
+
+    let meta_json = serde_json::to_string(&meta)?;
+    db::upsert_video(pool, &stem, Some(&stem), &meta_json).await?;
+    db::update_task(
+        pool,
+        task.id,
+        TaskStatus::Done.as_str(),
+        Some(&dest_file.to_string_lossy()),
+        None,
+    )
+    .await?;
+    tracing::info!(file = %stem, "无番号文件降级生成 strm（不刮削）");
+    Ok(ProcessOutcome {
+        status: TaskStatus::Done.as_str(),
+        dest: Some(dest_file),
+        message: format!("generated without number: {stem}"),
+    })
+}
+
 /// 处理单条任务：解析 → 刮削 → 整理 → NFO → 落库。
 ///
 /// `strm_cloud` 是**网盘内路径**（`/115/电影/x.mp4`），只在 `.strm` 模式下用：
@@ -83,6 +149,13 @@ pub async fn process_task(
     let number = match &parsed.number {
         Some(n) => n.clone(),
         None => {
+            // 🔴 无番号文件在 strm 模式下**降级生成**（douyin-nas 模式）：
+            //    网盘里大量文件名根本没有番号（网盘转存/素人命名），全跳过
+            //    就是「strm 生成不了」。不刮削，按文件名直接写指针 + 合成
+            //    NFO（标题=文件名），媒体库照样可看。其他模式维持跳过。
+            if mode == OrganizeMode::Strm {
+                return no_number_strm(pool, task, cfg, library_root, strm_cloud).await;
+            }
             db::update_task(pool, task.id, TaskStatus::Failed.as_str(), None, Some("无法识别番号"))
                 .await?;
             return Ok(ProcessOutcome {
@@ -351,16 +424,10 @@ pub async fn run_strm_jobs(
     };
 
     // ── 阶段二：逐条处理 ──────────────────────────────────────
+    // 无番号的文件也照常进 process_task —— strm 模式下降级生成（见其内注释）
     for entry in &sources {
         let src_str = entry.path.clone();
         let parsed = parse_filename(&src_str);
-        if parsed.number.is_none() {
-            stats.failed += 1;
-            if stats.errors.len() < 20 {
-                stats.errors.push(format!("无法识别番号，跳过：{src_str}"));
-            }
-            continue;
-        }
 
         // 网盘路径算不出来（不在挂载根下 / 服务端没给）就别建任务 —— 建了也是白失败
         let cloud = match source.cloud_path(&src_str) {
@@ -390,10 +457,17 @@ pub async fn run_strm_jobs(
         }
 
         let task_id = db::insert_task(pool, &src_str, parsed.number.as_deref()).await?;
-        let tasks = db::list_tasks(pool).await?;
-        let Some(task) = tasks.into_iter().find(|t| t.id == task_id) else {
-            stats.failed += 1;
-            continue;
+        // 直接构造（insert 后字段是确定的），别 list_tasks 全表 —— 大目录下这是 O(n²)
+        let task = TaskRow {
+            id: task_id,
+            kind: String::new(),
+            status: "pending".into(),
+            source_path: src_str.clone(),
+            dest_path: None,
+            number: parsed.number.clone(),
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
         };
 
         match process_task(

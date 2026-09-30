@@ -66,6 +66,9 @@ pub struct StrmRunner {
     running: std::sync::atomic::AtomicBool,
     last_run: std::sync::Mutex<Option<i64>>,
     state_path: PathBuf,
+    /// 上一轮（后台任务）的结果摘要：成功是 StrmRunStats 的 JSON，失败是
+    /// `ERR: 原因`。run 改成后台任务后，HTTP 只负责启动，结果靠 status 轮询。
+    last_stats: std::sync::Mutex<Option<String>>,
 }
 
 impl StrmRunner {
@@ -78,11 +81,21 @@ impl StrmRunner {
             running: std::sync::atomic::AtomicBool::new(false),
             last_run: std::sync::Mutex::new(last_run),
             state_path,
+            last_stats: std::sync::Mutex::new(None),
         }
     }
 
     pub fn is_running(&self) -> bool {
         self.running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 记录上一轮结果（成功 = stats JSON，失败 = `ERR: ...`）。
+    pub fn set_stats(&self, s: Option<String>) {
+        *self.last_stats.lock().unwrap() = s;
+    }
+
+    pub fn stats(&self) -> Option<String> {
+        self.last_stats.lock().unwrap().clone()
     }
 
     pub fn last_run(&self) -> Option<i64> {

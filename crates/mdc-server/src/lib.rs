@@ -813,17 +813,51 @@ async fn strm_scan(
 async fn strm_run(
     State(state): State<AppState>,
     Json(req): Json<StrmRunReq>,
-) -> Result<Json<pipeline::StrmRunStats>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let cfg = state.cfg.read().await.clone();
-    let ctx = scrape::ScrapeCtx::from_config(&cfg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("构建 HTTP 客户端失败: {e}")))?;
-    let engine = state.engine.clone();
-    let pool = state.pool.clone();
-    let stats =
-        pipeline::run_strm_jobs(&state.strm_runner, &pool, &engine, &ctx, &cfg, req.force)
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(stats))
+    let force = req.force;
+    // 🔴 **后台任务**：扫网盘 + 刮削要几分钟，同步等会把 HTTP 拖死 ——
+    //    手机 WebView/不稳定的通道直接断连，任务在 await 点被 abort，
+    //    表现就是「strm 生成不了」。启动即返回，结果经 /api/strm/status
+    //    的 last_stats 轮询。单飞令牌（runner.acquire）在任务里抢，重复触发安全。
+    let s2 = state.clone();
+    tokio::spawn(async move {
+        let runner = s2.strm_runner.clone();
+        match scrape::ScrapeCtx::from_config(&cfg) {
+            Ok(ctx) => {
+                match pipeline::run_strm_jobs(
+                    &runner,
+                    &s2.pool,
+                    &s2.engine,
+                    &ctx,
+                    &cfg,
+                    force,
+                )
+                .await
+                {
+                    Ok(stats) => {
+                        runner.set_stats(Some(
+                            serde_json::to_string(&stats).unwrap_or_default(),
+                        ));
+                        tracing::info!(
+                            added = stats.added,
+                            failed = stats.failed,
+                            skipped = stats.skipped,
+                            "strm 一轮完成"
+                        );
+                    }
+                    Err(e) => {
+                        runner.set_stats(Some(format!("ERR: {e:#}")));
+                        tracing::error!(error = %e, "strm 一轮失败");
+                    }
+                }
+            }
+            Err(e) => {
+                runner.set_stats(Some(format!("ERR: 构建 HTTP 客户端失败: {e}")));
+            }
+        }
+    });
+    Ok(Json(serde_json::json!({ "started": true })))
 }
 
 /// 网盘刮削的运行状态（定时器开关、上次/下次运行、已生成数量）。
@@ -845,6 +879,7 @@ async fn strm_status(
         "manifest_entries": manifest.entries.len(),
         "generated": generated,
         "out_root": cfg.strm_root().to_string_lossy(),
+        "last_stats": state.strm_runner.stats(),
     })))
 }
 
