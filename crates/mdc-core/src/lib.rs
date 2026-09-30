@@ -12,6 +12,7 @@ pub mod cd2;
 pub mod config;
 pub mod db;
 pub mod image;
+pub mod library;
 pub mod model;
 pub mod monitor;
 pub mod net;

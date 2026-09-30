@@ -8,6 +8,13 @@ license = "MIT"
 name = "mdc_mobile"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# 🔴 生产构建必须带：`--features custom-protocol`。没有它 tauri 的 cfg(dev)
+# 恒为 true（dev = !custom_protocol，与 debug/release 无关），安卓端 WebView
+# 的 tauri:// 请求会被代理到 devUrl（reqwest 请求 http://tauri.localhost/
+# DNS 必败），页面显示 "Failed to request http://tauri.localhost/"。
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 # 同上：tauri-build 在 build-dep 图里也带 schemars@0.8.22，resolver v2 两张图

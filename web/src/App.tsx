@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from './api';
+import { api, API_BASE, getToken } from './api';
 
 interface Task {
   id: number;
@@ -120,6 +120,36 @@ interface ProxyStatus {
   kernel_found: boolean;
 }
 
+// ---------- 自带影视库（P4） ----------
+interface LibItem {
+  number: string;
+  title: string;
+  year: string;
+  premiered: string;
+  actors: string[];
+  tags: string[];
+  studio: string | null;
+  runtime_min: number | null;
+  has_poster: boolean;
+  file_count: number;
+}
+
+interface LibFile {
+  name: string;
+  url: string;
+}
+
+interface LibDetail extends Omit<LibItem, 'has_poster' | 'file_count'> {
+  poster: string | null;
+  files: LibFile[];
+}
+
+// `<img>` / `<video>` 标签发不出 Authorization 头，海报与播放走 ?t= 查询串
+function mediaQuery(): string {
+  const t = getToken();
+  return t ? `?t=${encodeURIComponent(t)}` : '';
+}
+
 // 全局消息横幅的配色分类：错误红 / 进行中琥珀 / 其余绿
 const bannerKind = (m: string): 'ok' | 'err' | 'info' => {
   if (/error|失败|错误|不可用|不可写|算不出|拒绝|denied|failed/i.test(m)) return 'err';
@@ -164,6 +194,38 @@ function App() {
   const [candidates, setCandidates] = useState<Candidate[] | null>(null);
   const [manualList, setManualList] = useState<ManualItem[]>([]);
   const [candMsg, setCandMsg] = useState('');
+
+  // ---------- 影视库（默认视图） ----------
+  const [view, setView] = useState<'lib' | 'cfg'>('lib');
+  const [libQuery, setLibQuery] = useState('');
+  const [libItems, setLibItems] = useState<LibItem[] | null>(null);
+  const [libTotal, setLibTotal] = useState(0);
+  const [libLoading, setLibLoading] = useState(false);
+  const [detail, setDetail] = useState<LibDetail | null>(null);
+  const [playing, setPlaying] = useState<{ number: string; title: string; file: number } | null>(null);
+
+  const loadLib = (query = libQuery) => {
+    setLibLoading(true);
+    api<{ total: number; items: LibItem[] }>(
+      `/api/library?query=${encodeURIComponent(query)}`,
+    )
+      .then((j) => {
+        setLibItems(j.items);
+        setLibTotal(j.total);
+        setLibLoading(false);
+      })
+      .catch(() => setLibLoading(false));
+  };
+
+  const openDetail = (number: string) => {
+    api<LibDetail>(`/api/library/${encodeURIComponent(number)}`)
+      .then(setDetail)
+      .catch((e) => setMsg(String(e)));
+  };
+
+  const play = (number: string, title: string, file: number) => {
+    setPlaying({ number, title, file });
+  };
 
   const refresh = () => api<Task[]>('/api/tasks').then(setTasks).catch(() => {});
 
@@ -253,6 +315,7 @@ function App() {
     loadStatus();
     loadManual();
     loadProxy();
+    loadLib();
     // 定时器状态会自己变（后台在跑），轮询刷新
     const t = setInterval(loadStatus, 10000);
     // 内核是异步拉起的（拉订阅 + 等端口），启动中要多刷几次才能看到结果
@@ -262,6 +325,12 @@ function App() {
       clearInterval(t2);
     };
   }, []);
+
+  // 切回影视库视图时刷新（刚跑完一轮刮削回来看新海报）
+  const switchView = (v: 'lib' | 'cfg') => {
+    setView(v);
+    if (v === 'lib') loadLib();
+  };
 
   const saveNetdisk = () => {
     if (!nd) return;
@@ -354,6 +423,54 @@ function App() {
       <div className="wrap">
         {msg && <div className={`banner on ${bannerKind(msg)}`}>{msg}</div>}
 
+        <div className="vseg">
+          <button className={view === 'lib' ? 'on' : ''} onClick={() => switchView('lib')}>影视库</button>
+          <button className={view === 'cfg' ? 'on' : ''} onClick={() => switchView('cfg')}>设置</button>
+        </div>
+
+        {view === 'lib' && (
+          <>
+            <div className="row" style={{ marginTop: 16 }}>
+              <input className="inline-input" style={{ flex: 1, minWidth: 160 }}
+                placeholder="搜番号 / 标题 / 演员"
+                value={libQuery} onChange={(e) => setLibQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') loadLib(); }} />
+              <button className="btn pri" onClick={() => loadLib()}>搜索</button>
+            </div>
+            <div className="countbar">
+              <span className="hint" style={{ margin: 0 }}>
+                共 {libTotal} 部
+                {libItems && libTotal !== libItems.length ? ` · 筛出 ${libItems.length}` : ''}
+                {libLoading ? ' · 读取中…' : ''}
+              </span>
+              <span className="sp" />
+              <button className="tbtn" onClick={() => loadLib()}>刷新</button>
+            </div>
+
+            {libItems && libItems.length === 0 ? (
+              <div className="empty">
+                库还是空的 —— 去「设置」的网盘刮削页配好 CD2、跑一轮就有了。
+              </div>
+            ) : (
+              <div className="wall">
+                {(libItems ?? []).map((it) => (
+                  <button key={it.number} className="wcard" onClick={() => openDetail(it.number)}>
+                    <div className="pwrap">
+                      {it.has_poster
+                        ? <img loading="lazy" alt=""
+                            src={`${API_BASE}/api/library/${encodeURIComponent(it.number)}/poster${mediaQuery()}`} />
+                        : <div className="ph">{it.number}</div>}
+                    </div>
+                    <div className="wname">{it.number}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {view === 'cfg' && (
+          <>
         <section className="card">
           <div className="thead">番号解析测试</div>
           <p className="hint">输入一个文件名，看看引擎从里面认出了什么（番号、前后缀、清晰度…）。</p>
@@ -736,8 +853,63 @@ function App() {
           )}
         </section>
 
+          </>
+        )}
+
         <footer>视频不搬动，只生成 .strm 指针 —— 网盘里的文件留在网盘里。</footer>
       </div>
+
+      {detail && (
+        <div className="sheet" onClick={() => setDetail(null)}>
+          <div className="sbox" onClick={(e) => e.stopPropagation()}>
+            <div className="shead">
+              <div className="pwrap sposter">
+                {detail.poster
+                  ? <img alt=""
+                      src={`${API_BASE}/api/library/${encodeURIComponent(detail.number)}/poster${mediaQuery()}`} />
+                  : <div className="ph">{detail.number}</div>}
+              </div>
+              <div className="sinfo">
+                <div className="stitle">{detail.title}</div>
+                <div className="smeta">
+                  {detail.number} · {detail.premiered || detail.year || '日期未知'}
+                  {detail.runtime_min != null && <> · {detail.runtime_min} 分钟</>}<br />
+                  {detail.actors.length > 0 && <>演员：{detail.actors.join('、')}<br /></>}
+                  {detail.studio && <>制作：{detail.studio}<br /></>}
+                  {detail.tags.length > 0 && <>标签：{detail.tags.join('、')}</>}
+                </div>
+              </div>
+              <button className="sx" onClick={() => setDetail(null)}>✕</button>
+            </div>
+            <div className="sfiles">
+              {detail.files.map((f, i) => (
+                <div key={i} className="sfile">
+                  <span className="fn">{f.name}</span>
+                  <button className="btn sm pri"
+                    onClick={() => play(detail.number, detail.title, i)}>播放</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {playing && (
+        <div className="player">
+          <div className="pbar">
+            <button onClick={() => setPlaying(null)}>‹ 返回</button>
+            <span className="ptitle">
+              {playing.title}
+              {detail && detail.files[playing.file] ? ` · ${detail.files[playing.file].name}` : ''}
+            </span>
+          </div>
+          <video
+            key={`${playing.number}-${playing.file}`}
+            controls autoPlay playsInline
+            src={`${API_BASE}/api/library/${encodeURIComponent(playing.number)}/play?file=${playing.file}${mediaQuery().replace('?', '&')}`}
+          />
+        </div>
+      )}
     </>
   );
 }

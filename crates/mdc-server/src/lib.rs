@@ -13,7 +13,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post, put},
     Json, Router,
 };
@@ -30,6 +30,7 @@ use tower_http::trace::TraceLayer;
 use mdc_core::{
     config::{AppConfig, ProxyConfig},
     db,
+    library,
     model::OrganizeMode,
     pipeline, proxy, scrape,
     VERSION,
@@ -146,6 +147,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/videos/{number}/meta",
             put(save_manual_meta).delete(clear_manual_meta),
         )
+        // 自带影视库（P4）：海报墙 / 详情 / 海报图 / 播放
+        .route("/api/library", get(library_list))
+        .route("/api/library/{number}", get(library_detail))
+        .route("/api/library/{number}/poster", get(library_poster))
+        .route("/api/library/{number}/play", get(library_play))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // login/health 公开；其余 API 过鉴权
@@ -220,12 +226,20 @@ async fn auth_middleware(
     // 未配置账号密码 = 不启用鉴权（本地单机模式）
     let enabled = state.cfg.read().await.auth_enabled();
     if enabled {
-        let token = request
+        let header_token = request
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(|s| s.to_string());
+        // 查询串兜底：`<video>` / `<img>` 标签发不出 Authorization 头，
+        // 只能走 `?t=<jwt>`（Jellyfin 的 api_key 同款做法；家庭自用可接受）。
+        // JWT 是 base64url + 两个点，不含需要百分号编码的字符，原样取值即可。
+        let query_token = request.uri().query().and_then(|q| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("t=").map(|v| v.to_string()))
+        });
+        let token = header_token.or(query_token);
         let ok = match token {
             Some(t) => decode::<Claims>(
                 &t,
@@ -833,6 +847,151 @@ async fn list_manual_meta(
         .map(|(number, title)| serde_json::json!({ "number": number, "title": title }))
         .collect();
     Ok(Json(serde_json::json!({ "items": items })))
+}
+
+// ---------- 自带影视库（P4，docs/LIBRARY.md） ----------
+
+#[derive(Deserialize)]
+struct LibraryQuery {
+    /// 关键词：命中番号 / 标题 / 演员
+    #[serde(default)]
+    query: String,
+    /// 标签精确过滤
+    #[serde(default)]
+    tag: String,
+}
+
+/// 扫库（阻塞文件 IO 放线程池里，别堵 runtime）。
+async fn load_library(state: &AppState) -> Result<Vec<library::LibEntry>, (StatusCode, String)> {
+    let cfg = state.cfg.read().await.clone();
+    tokio::task::spawn_blocking(move || library::scan_library(&cfg.strm_root()))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn library_list(
+    State(state): State<AppState>,
+    Query(q): Query<LibraryQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let items = load_library(&state).await?;
+    let total = items.len();
+    let items = library::filter_entries(items, &q.query, &q.tag);
+    let shown = items.len();
+    // 列表只给海报墙要用的字段；files 的直链在详情/播放接口再给
+    let items: Vec<serde_json::Value> = items
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "number": e.number,
+                "title": e.title,
+                "year": e.year,
+                "premiered": e.premiered,
+                "actors": e.actors,
+                "tags": e.tags,
+                "studio": e.studio,
+                "runtime_min": e.runtime_min,
+                "has_poster": e.poster.is_some(),
+                "file_count": e.files.len(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "total": total,
+        "shown": shown,
+        "items": items,
+    })))
+}
+
+async fn library_detail(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let items = load_library(&state).await?;
+    let found = items
+        .iter()
+        .find(|e| e.number == number)
+        .or_else(|| items.iter().find(|e| e.number.eq_ignore_ascii_case(&number)));
+    match found {
+        Some(e) => Ok(Json(serde_json::to_value(e).unwrap_or_default())),
+        None => Err((StatusCode::NOT_FOUND, format!("库里没有 {number}"))),
+    }
+}
+
+/// 海报图。`<img>` 标签带不了鉴权头，靠 `?t=` 查询串过中间件。
+async fn library_poster(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+) -> Response {
+    let items = match load_library(&state).await {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let found = items
+        .iter()
+        .find(|e| e.number == number)
+        .or_else(|| items.iter().find(|e| e.number.eq_ignore_ascii_case(&number)));
+    let Some(poster) = found.and_then(|e| e.poster.clone()) else {
+        return (StatusCode::NOT_FOUND, "no poster").into_response();
+    };
+    let ct = match poster.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        _ => "image/jpeg",
+    };
+    match tokio::fs::read(&poster).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, ct),
+                // 海报基本不变，浏览器缓存一小时，省得海报墙每次滚一圈都闪
+                (header::CACHE_CONTROL, "private, max-age=3600"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PlayQuery {
+    /// 同番号多文件时的下标（默认第一个）
+    #[serde(default)]
+    file: usize,
+}
+
+/// 播放入口：302 到 strm 里的 CD2 直链。
+///
+/// 默认不做 Range 代理（docs/LIBRARY.md 的兜底档留给 P4b）——直链指向
+/// CD2 `/static/http/...`，CD2 自己就是流式响应，客户端拖进度条没问题。
+async fn library_play(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+    Query(f): Query<PlayQuery>,
+) -> Response {
+    let items = match load_library(&state).await {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let found = items
+        .iter()
+        .find(|e| e.number == number)
+        .or_else(|| items.iter().find(|e| e.number.eq_ignore_ascii_case(&number)));
+    let Some(e) = found else {
+        return (StatusCode::NOT_FOUND, format!("库里没有 {number}")).into_response();
+    };
+    if e.files.is_empty() {
+        return (StatusCode::NOT_FOUND, "该条目没有可播文件").into_response();
+    }
+    let idx = f.file.min(e.files.len() - 1);
+    let url = e.files[idx].url.trim().to_string();
+    if url.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            "直链为空（strm 内容缺失），先到网盘刮削页跑一轮",
+        )
+            .into_response();
+    }
+    // 302 Found：`<video>`/浏览器对 3xx 一视同仁地跟随
+    Redirect::to(&url).into_response()
 }
 
 async fn create_tasks(
