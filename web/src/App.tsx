@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, API_BASE, getToken } from './api';
 
 interface Task {
@@ -130,6 +130,7 @@ interface LibItem {
 interface LibFile {
   name: string;
   url: string;
+  dest: string;
 }
 
 interface LibDetail extends Omit<LibItem, 'has_poster' | 'file_count'> {
@@ -213,6 +214,12 @@ function App() {
   const [libLoading, setLibLoading] = useState(false);
   const [detail, setDetail] = useState<LibDetail | null>(null);
   const [playing, setPlaying] = useState<{ number: string; title: string; file: number } | null>(null);
+  // 播放器：倍速 + 进度记忆（localStorage，key=番号/file）
+  const vref = useRef<HTMLVideoElement | null>(null);
+  const [rate, setRate] = useState(1);
+  // 重新匹配（详情页：调多源，选中即存人工精选 + 移出库，下轮按新元数据重建）
+  const [rematchOpen, setRematchOpen] = useState(false);
+  const [rematchList, setRematchList] = useState<{ provider: string; status: string; error?: string; meta?: VideoMeta }[] | null>(null);
 
   const loadLib = (query = libQuery) => {
     setLibLoading(true);
@@ -450,6 +457,67 @@ function App() {
     api<{ alive: boolean; url: string; dav: string }>('/api/cd2/status')
       .then(setCd2)
       .catch(() => setCd2(null));
+
+  // ---------- 播放进度记忆（localStorage，key = 番号/文件序号） ----------
+  const progressKey = (number: string, file: number) => `${number}/${file}`;
+  const loadProgress = (k: string): { pos: number; dur: number; ts: number } | undefined => {
+    try {
+      return (JSON.parse(localStorage.getItem('mdc_progress') || '{}') as Record<string, { pos: number; dur: number; ts: number }>)[k];
+    } catch { return undefined; }
+  };
+  const saveProgress = (k: string, pos: number, dur: number) => {
+    try {
+      const all = JSON.parse(localStorage.getItem('mdc_progress') || '{}') as Record<string, { pos: number; dur: number; ts: number }>;
+      all[k] = { pos, dur, ts: Date.now() };
+      localStorage.setItem('mdc_progress', JSON.stringify(all));
+    } catch { /* 存储满了就算了 */ }
+  };
+  const clearProgress = (k: string) => {
+    try {
+      const all = JSON.parse(localStorage.getItem('mdc_progress') || '{}');
+      delete all[k];
+      localStorage.setItem('mdc_progress', JSON.stringify(all));
+    } catch { /* ignore */ }
+  };
+
+  const cycleRate = () => {
+    const next = rate === 1 ? 1.25 : rate === 1.25 ? 1.5 : rate === 1.5 ? 2 : 1;
+    setRate(next);
+    if (vref.current) vref.current.playbackRate = next;
+  };
+  const goFull = () => {
+    const v = vref.current as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
+    if (!v) return;
+    if (v.requestFullscreen) v.requestFullscreen().catch(() => {});
+    else v.webkitEnterFullscreen?.();
+  };
+
+  // ---------- 重新匹配（详情页：多源查询 → 采用人工精选 → 移出库待重建） ----------
+  const openRematch = () => {
+    if (!detail) return;
+    setRematchOpen(true);
+    setRematchList(null);
+    api<{ candidates: { provider: string; status: string; error?: string; meta?: VideoMeta }[] }>(
+      '/api/scrape/candidates',
+      { method: 'POST', body: JSON.stringify({ number: detail.number }) },
+    )
+      .then((j) => setRematchList(j.candidates))
+      .catch((e) => { setRematchList([]); setMsg(String(e)); });
+  };
+  const adoptMeta = async (meta: VideoMeta) => {
+    if (!detail) return;
+    try {
+      await api(`/api/videos/${encodeURIComponent(meta.number)}/meta`, {
+        method: 'PUT',
+        body: JSON.stringify(meta),
+      });
+      await api(`/api/library/${encodeURIComponent(detail.number)}`, { method: 'DELETE' });
+      setMsg(`已采用「${meta.number}」——点「保存并生成 strm」按新元数据重建`);
+      loadLib();
+      setDetail(null);
+      setRematchOpen(false);
+    } catch (e) { setMsg(String(e)); }
+  };
 
   const loadGroups = () =>
     api<{ groups: { name: string; now: string; all: string[] }[] }>('/api/proxy/groups')
@@ -1065,35 +1133,90 @@ function App() {
 
       {detail && (
         <div className="sheet" onClick={() => setDetail(null)}>
-          <div className="sbox" onClick={(e) => e.stopPropagation()}>
-            <div className="shead">
-              <div className="pwrap sposter">
+          <div className="dbox" onClick={(e) => e.stopPropagation()}>
+            <button className="sx" onClick={() => setDetail(null)}>✕</button>
+            <div className="dhead">
+              <div className="pwrap dposter">
                 {detail.poster
                   ? <img alt=""
                       src={`${API_BASE}/api/library/${encodeURIComponent(detail.number)}/poster${mediaQuery()}`} />
                   : <div className="ph">{detail.number}</div>}
               </div>
-              <div className="sinfo">
-                <div className="stitle">{detail.title}</div>
-                <div className="smeta">
-                  {detail.number} · {detail.premiered || detail.year || '日期未知'}
-                  {detail.runtime_min != null && <> · {detail.runtime_min} 分钟</>}<br />
-                  {detail.actors.length > 0 && <>演员：{detail.actors.join('、')}<br /></>}
-                  {detail.studio && <>制作：{detail.studio}<br /></>}
-                  {detail.tags.length > 0 && <>标签：{detail.tags.join('、')}</>}
+              <div className="dmain">
+                <div className="dtitle">{detail.title}</div>
+                <div className="dchips">
+                  <span className="chip">{detail.premiered?.slice(0, 4) || detail.year || '日期未知'}</span>
+                  <span className="chip">{detail.number}</span>
+                  {detail.runtime_min != null && <span className="chip">{detail.runtime_min} 分钟</span>}
+                  {detail.studio && <span className="chip">{detail.studio}</span>}
                 </div>
+                {detail.tags.length > 0 && (
+                  <div className="dtags">
+                    {detail.tags.map((t) => <span key={t} className="chip tagc">{t}</span>)}
+                  </div>
+                )}
+                <div className="dfile">
+                  <span className="ell">{detail.files[0]?.name}</span>
+                  <button className="btn sm" type="button"
+                    onClick={() => navigator.clipboard?.writeText(detail.files[0]?.name ?? '')}>复制</button>
+                </div>
+                {detail.actors.length > 0 && (
+                  <div className="dactors">演员 <b>{detail.actors.join(' / ')}</b></div>
+                )}
+                {(() => {
+                  const p = loadProgress(progressKey(detail.number, 0));
+                  if (!p || p.pos <= 5) return null;
+                  const pct = p.dur ? Math.round((p.pos / p.dur) * 100) : 0;
+                  if (pct >= 95) return null;
+                  const mm = Math.floor(p.pos / 60), ss = String(Math.floor(p.pos % 60)).padStart(2, '0');
+                  return <div className="hint st-warn">上次看到 {mm}:{ss}（{pct}%）—— 播放会自动续播</div>;
+                })()}
+                <button className="btn pri dplay" type="button"
+                  onClick={() => play(detail.number, detail.title, 0)}>▶ 播放</button>
+                {detail.files.length > 1 && (
+                  <div className="sfiles">
+                    {detail.files.map((f, i) => (
+                      <div key={i} className="sfile">
+                        <span className="fn">{f.name}</span>
+                        <button className="btn sm pri" type="button"
+                          onClick={() => play(detail.number, detail.title, i)}>播放</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              <button className="sx" onClick={() => setDetail(null)}>✕</button>
             </div>
-            <div className="sfiles">
-              {detail.files.map((f, i) => (
-                <div key={i} className="sfile">
-                  <span className="fn">{f.name}</span>
-                  <button className="btn sm pri"
-                    onClick={() => play(detail.number, detail.title, i)}>播放</button>
-                </div>
-              ))}
+            <div className="dops">
+              <button className="btn danger sm" type="button"
+                onClick={async () => {
+                  if (!confirm(`把「${detail.title}」移出媒体库？网盘里的视频不受影响。`)) return;
+                  try {
+                    await api(`/api/library/${encodeURIComponent(detail.number)}`, { method: 'DELETE' });
+                    setMsg(`已移出「${detail.number}」——重新匹配后点「保存并生成 strm」按新元数据重建`);
+                    loadLib();
+                    setDetail(null);
+                  } catch (e) { setMsg(String(e)); }
+                }}>移出库</button>
+              <button className="btn sm" type="button" onClick={openRematch}>重新匹配</button>
+              <button className="btn sm" type="button" onClick={() => setDetail(null)}>关闭</button>
             </div>
+            {rematchOpen && (
+              <div className="rematch">
+                {!rematchList && <p className="hint">正在向各刮削源查询「{detail.number}」…</p>}
+                {rematchList && rematchList.length === 0 && <p className="hint">所有源都没查到（试试换节点）。</p>}
+                {rematchList?.map((c) => (
+                  <div key={c.provider} className="dirrow">
+                    <span className="ell" style={{ flex: 1 }}>
+                      {c.provider} · {c.status}
+                      {c.meta ? <> —— {(c.meta.title || '').slice(0, 60)}</> : c.error ? ` · ${c.error}` : ''}
+                    </span>
+                    {c.meta && c.status === 'hit' && (
+                      <button className="btn sm pri" type="button" onClick={() => adoptMeta(c.meta!)}>采用</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1106,10 +1229,27 @@ function App() {
               {playing.title}
               {detail && detail.files[playing.file] ? ` · ${detail.files[playing.file].name}` : ''}
             </span>
+            <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+              <button className="btn sm" onClick={cycleRate}>{rate}x</button>
+              <button className="btn sm" onClick={goFull}>全屏</button>
+            </span>
           </div>
           <video
+            ref={vref}
             key={`${playing.number}-${playing.file}`}
             controls autoPlay playsInline
+            onLoadedMetadata={(e) => {
+              const k = progressKey(playing.number, playing.file);
+              const p = loadProgress(k);
+              const v = e.currentTarget;
+              if (p && p.pos > 5 && p.dur && p.pos < p.dur - 15) v.currentTime = p.pos;
+              v.playbackRate = rate;
+            }}
+            onTimeUpdate={(e) => {
+              const v = e.currentTarget;
+              if (v.duration) saveProgress(progressKey(playing.number, playing.file), v.currentTime, v.duration);
+            }}
+            onEnded={() => clearProgress(progressKey(playing.number, playing.file))}
             src={`${API_BASE}/api/library/${encodeURIComponent(playing.number)}/play?file=${playing.file}${mediaQuery().replace('?', '&')}`}
           />
         </div>

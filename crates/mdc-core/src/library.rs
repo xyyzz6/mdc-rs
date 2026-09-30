@@ -20,6 +20,8 @@ pub struct LibFile {
     pub name: String,
     /// 播放直链（strm 文件内容，通常指向 CD2 `/static/http/...`）
     pub url: String,
+    /// .strm 文件自身路径（「移出库」删除用）
+    pub dest: String,
 }
 
 /// 一条影视库条目 = 一个番号。
@@ -137,6 +139,7 @@ fn scan_one(strm_path: &Path) -> Option<(String, LibFile, Option<String>)> {
         LibFile {
             name,
             url,
+            dest: strm_path.to_string_lossy().to_string(),
         },
         nfo,
     ))
@@ -252,6 +255,59 @@ fn collect_strm(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
             out.push(p);
         }
     }
+}
+
+/// 「移出库」：删掉该番号的所有 `.strm` 及同 stem 的 NFO/海报，并从增量
+/// 清单里移除对应条目（否则下一轮会因清单还在而跳过重建，或者反过来
+/// 残留条目指向已删文件）。返回删除的 `.strm` 数量。
+///
+/// `重新匹配` 也走这里：采用人工精选后先移出，下一轮按新元数据重建。
+pub fn remove_entry(strm_root: &Path, manifest_path: &Path, number: &str) -> anyhow::Result<u32> {
+    let want = number.trim().to_ascii_lowercase();
+    let lib = scan_library(strm_root);
+    let Some(entry) = lib.iter().find(|e| e.number.eq_ignore_ascii_case(&want)) else {
+        anyhow::bail!("媒体库里没有 {number}");
+    };
+
+    let mut removed = 0u32;
+    let mut manifest = crate::strm::Manifest::load(manifest_path);
+    for f in &entry.files {
+        let dest = PathBuf::from(&f.dest);
+        // 同 stem 的附属文件一起删（NFO / 海报 / 降级生成时的封面拷贝）
+        let stem_exts = ["nfo", "jpg", "png"];
+        for ext in stem_exts {
+            let p = dest.with_extension(ext);
+            if p.exists() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+        // `<stem>-poster.jpg` 变体（with_extension 只会替换最后一个扩展名）
+        if let Some(stem) = dest.file_stem().and_then(|s| s.to_str()) {
+            let poster = dest.with_file_name(format!("{stem}-poster.jpg"));
+            if poster.exists() {
+                let _ = std::fs::remove_file(&poster);
+            }
+        }
+        if dest.exists() {
+            let _ = std::fs::remove_file(&dest);
+            removed += 1;
+        }
+        // 清单按网盘路径（src）为键：值里 out 指向我们刚删的文件
+        let victims: Vec<String> = manifest
+            .entries
+            .iter()
+            .filter(|(_, e)| e.out == f.dest)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in victims {
+            manifest.entries.remove(&k);
+        }
+    }
+    manifest.save(manifest_path)?;
+    if removed == 0 {
+        anyhow::bail!("没有可移出的文件（{number}）");
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

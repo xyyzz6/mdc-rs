@@ -14,7 +14,7 @@ use axum::{
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -160,6 +160,8 @@ pub fn build_router(state: AppState) -> Router {
         // 前端 fetch 127.0.0.1:19798 是跨源（CD2 API 无 CORS 头），
         // 必须经本端代探
         .route("/api/cd2/status", get(cd2_status))
+        // 移出库（删 .strm/NFO/海报 + 清单条目）；重新匹配也走它
+        .route("/api/library/{number}", delete(library_remove))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // login/health 公开；其余 API 过鉴权
@@ -1227,6 +1229,25 @@ async fn library_play(
     }
     // 302 Found：`<video>`/浏览器对 3xx 一视同仁地跟随
     Redirect::to(&url).into_response()
+}
+
+/// 移出库：删该番号的 .strm/NFO/海报 + 清单条目。重新匹配（采用人工精选
+/// 后）也走它 —— 下一轮按新元数据重建。
+async fn library_remove(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cfg = state.cfg.read().await.clone();
+    let num = number.clone();
+    let n = tokio::task::spawn_blocking(move || {
+        mdc_core::library::remove_entry(&cfg.strm_root(), &cfg.strm_manifest_path(), &num)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "removed": n, "number": number }),
+    ))
 }
 
 async fn create_tasks(
