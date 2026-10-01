@@ -2,13 +2,20 @@
 ### 拾光 · PickLight —— 飞牛 fnOS .fpk 打包脚本
 ###
 ### 用法：
-###   bash fpk-tools/build.sh                  # 标准版：不含镜像，安装时在 NAS 上就地构建（约 5-10 分钟）
-###   bash fpk-tools/build.sh <镜像tag>         # 指定镜像名（默认 picklight:latest）
+###   bash fpk-tools/build.sh                  # 离线版（默认）：带完整镜像，安装零联网
+###   bash fpk-tools/build.sh amd64            # 只打 x86_64 一枚架构
+###   bash fpk-tools/build.sh --source         # 回退：只带源码，让 NAS 就地构建（调试用）
 ###
 ### 产物：dist/picklight-<版本>.fpk
 ###
-### ⚠️ 本机没有 Docker 时也能打：fpk 里带的是**源码**，镜像交给 NAS 自己构建。
-###    真要打「内嵌镜像版」才需要本机有 docker（本脚本目前只出标准版）。
+### 🔴 默认走**离线镜像**路线：镜像（静态 mdc-server + mihomo 内核）由
+###    build/linux-x86_64|linux-aarch64 里的交叉编译产物 + tools/make_offline_image.py
+###    组装成 docker save 格式的 tar.gz，随 fpk 一起发出去，安装时 `docker load -i`
+###    —— 不再在 NAS 上编译、不拉 rust 工具链、不碰 registry-1.docker.io。
+###    （旧版就是这么挂的：`failed to run Build function: base name (${BASE_IMAGE}) should not be blank`。）
+###
+### ⚠️ 没有交叉编译产物时本脚本会自动回退到「带源码就地构建」的老路，
+###    并明确打印一行警告 —— 别把回退包当离线包发出去。
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +26,10 @@ SRC_DIR="${FPK_DIR}/app/src"
 
 IMAGE="${1:-picklight:latest}"
 VER="${2:-}"
+ONLY_ARCH=""
+case "${1:-}" in
+    amd64|arm64) ONLY_ARCH="$1" ;;
+esac
 
 # fnpack：优先用仓库自带的，其次本机那一份，再不行就下载
 FNPACK="${SCRIPT_DIR}/fnpack.exe"
@@ -60,8 +71,30 @@ PY_BARE="$(pick_py bare || true)"
 [ -n "${VER}" ] || VER="$(grep '^version' "${FPK_DIR}/manifest" | sed 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
 echo "[build] 应用版本 : ${VER}"
 echo "[build] 镜像 tag : ${IMAGE}"
+echo "[build] 架构     : ${ONLY_ARCH:-全部（amd64 + arm64）}"
 
-# ── 1. 同步源码进 fpk/app/src（单一源：永远从项目根拷，不手工维护第二份）──
+# ── 1. 离线镜像归档 ─────────────────────────────────────────────────────
+# 先把上次打的归档清掉（架构切换 / 换版本时，旧 tar 留在 image/ 里会被一起打进包）
+for stale in "${FPK_DIR}"/app/image/picklight-*.tar.gz; do
+    [ -e "${stale}" ] || continue
+    case "${stale}" in *"-amd64.tar.gz"|*-"arm64.tar.gz") ;; *) continue ;; esac
+    if [ "${ONLY_ARCH:-}" != "" ]; then
+        case "${stale}" in *"-${ONLY_ARCH}.tar.gz") continue ;; esac
+    fi
+    mv -f "${stale}" "${PROJ_ROOT}/_stale-img-$(date +%s)-$(basename "${stale}")" 2>/dev/null
+done
+echo "[build] 组装离线镜像 -> fpk/app/image ..."
+if bash "${SCRIPT_DIR}/build_offline_image.sh" ${ONLY_ARCH:-}; then
+    OFFLINE=1
+else
+    OFFLINE=0
+    echo "[build] ⚠️⚠️ 没有可用的交叉编译产物，回退到「带源码、让 NAS 就地构建」的老路 ——"
+    echo "[build] ⚠️⚠️ 这个包在联网差的 NAS 上会装不上（拉 rust 工具链 / 基础镜像超时）。"
+    echo "[build]   先跑：bash tools/build_linux_cross.sh 造 build/linux-*/mdc-server 再重打。"
+fi
+
+# ── 1b. 同步源码进 fpk/app/src（只有回退分支需要；离线版用不着源码）────
+if [ "${OFFLINE}" != "1" ]; then
 echo "[build] 同步源码 -> fpk/app/src ..."
 # ⚠️ 这一句的 rm 绝对不能"尽力而为"：`cp -r crates src/crates` 在目标已存在时
 #    会往里再嵌一层（src/crates/crates/**），脏包一旦发出去很难查。
@@ -78,12 +111,11 @@ wipe_dir() {
 }
 wipe_dir "${SRC_DIR}" || exit 1
 mkdir -p "${SRC_DIR}"
-cp "${FPK_DIR}/Dockerfile" "${SRC_DIR}/"
 cp "${PROJ_ROOT}/Cargo.toml" "${PROJ_ROOT}/Cargo.lock" "${SRC_DIR}/"
 cp -r "${PROJ_ROOT}/crates" "${SRC_DIR}/crates"
 # ⚠️ 只拷 web/dist，**绝不拷整个 web**：node_modules 一进去 app.tgz 就多两千多个
 #    条目、几十 MB（飞牛安装要解包，白白慢一大截），而 build.rs 唯一读的就是
-#    <src>/web/dist。Docker 镜像构建同样只读 dist（见 fpk/Dockerfile 的说明）。
+#    <src>/web/dist。
 mkdir -p "${SRC_DIR}/web"
 tar -cf - -C "${PROJ_ROOT}/web" dist index.html | tar -xf - -C "${SRC_DIR}/web"
 # 编译期要用到的工具脚本（build.rs / 打包校验）
@@ -100,6 +132,7 @@ done
 find "${SRC_DIR}" -type d -name target -prune -exec rm -rf {} + 2>/dev/null
 _left="$(find "${SRC_DIR}" -type d -name target 2>/dev/null)"
 [ -z "${_left}" ] || { echo "错误：源码目录里还有 target 残留：${_left}" >&2; exit 1; }
+fi
 
 # ── 2. 图标 ─────────────────────────────────────────────────────────────
 if [ ! -f "${FPK_DIR}/ICON.PNG" ]; then

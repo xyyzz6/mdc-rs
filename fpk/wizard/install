@@ -1,6 +1,6 @@
 [
   {
-    "stepTitle": "第 1 步 / 共 3 步：网盘挂载目录与 strm 输出目录",
+    "stepTitle": "第 1 步 / 共 2 步：网盘挂载目录与 strm 输出目录",
     "items": [
       {
         "type": "tips",
@@ -33,7 +33,7 @@
     ]
   },
   {
-    "stepTitle": "第 2 步 / 共 3 步：CloudDrive2 服务地址",
+    "stepTitle": "第 2 步 / 共 2 步：CloudDrive2 服务地址、访问端口与高级选项",
     "items": [
       {
         "type": "tips",
@@ -70,15 +70,6 @@
             "message": "端口需为 2-5 位数字"
           }
         ]
-      }
-    ]
-  },
-  {
-    "stepTitle": "第 3 步 / 共 3 步：访问端口与高级选项",
-    "items": [
-      {
-        "type": "tips",
-        "helpText": "下面几项<b>看不懂就保持默认，不要改</b>。首次安装需要在 NAS 上就地构建镜像（要装编译工具链，通常 3-8 分钟），<b>中途别关页面</b>。"
       },
       {
         "type": "text",
@@ -103,20 +94,8 @@
         "initValue": "true"
       },
       {
-        "type": "text",
-        "field": "wizard_base_image",
-        "label": "基础镜像地址（拉不动时填国内加速源）",
-        "initValue": "docker.m.daocloud.io/library/debian:bookworm-slim",
-        "rules": [
-          {
-            "pattern": "^$|^[A-Za-z0-9._:/-]+$",
-            "message": "只能填镜像地址，不要带 http:// 或空格"
-          }
-        ]
-      },
-      {
         "type": "tips",
-        "helpText": "⚠️ 安装时若报 <b>context deadline exceeded</b> 或出现 <b>registry-1.docker.io</b>，说明 NAS 连不上 Docker Hub。安装程序会自动换下面几个国内加速源逐个重试：<br/>docker.m.daocloud.io　docker.1ms.run　docker.fnnas.com<br/><br/>若都失败，请先去「Docker → 设置 → 镜像加速」配好一个能用的加速源，再回来安装。"
+        "helpText": "✅ 本应用<b>自带完整镜像</b>（程序本体与代理内核都在包里），安装时直接载入，<b>不需要下载编译工具链、也不联网拉基础镜像</b>，通常一两分钟内装完。<br/><br/>⚠️ 若安装报「离线镜像载入失败」，通常是 Docker 服务异常或磁盘剩余空间不足（约需 150MB），请先到「Docker → 设置」确认，再卸载重装本应用。"
       }
     ]
   }

@@ -7,6 +7,7 @@ Yet another Movie Data Capture tool —— 一套 Rust 核心覆盖三端：
 | 🐳 **Docker** | NAS/服务器部署，`docker/docker-compose.yml` 一键起 |
 | 🪟 **Windows exe** | 单文件服务，双击即用（或 Tauri 桌面安装包） |
 | 📱 **Android APK** | 完整引擎跑在手机本地，离线可用（Tauri 2） |
+| 📦 **飞牛 fnOS（.fpk）** | 离线镜像随包带走，`docker load` 载入，NAS 上不联网不编译 |
 
 架构与设计细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -108,12 +109,26 @@ DOCKER="sudo docker" bash docker/verify.sh
 打包 → 得到 `dist/picklight-<版本>.fpk`，在飞牛「应用中心 → 本地安装」里选这个文件装上就行：
 
 ```bash
-bash fpk-tools/build.sh              # 产出 dist/picklight-0.1.0.fpk（≈270 KB）
+bash tools/build_linux_cross.sh      # 交叉编译两个架构的静态 mdc-server（本机不需要 Docker/无需目标机）
+bash fpk-tools/build.sh              # → dist/picklight-0.1.1.fpk（≈120 MB）
 ```
 
-包里带的是**源码 + 前端产物**，不在包里塞镜像：安装时镜像由你的 NAS 就地构建
-（`docker compose build`，一般 3-8 分钟，第一次最慢）。这样做的好处是改一行代码
-重新打 fpk 就行，不用本机有 Docker，也不用把几百 MB 镜像塞进包里。
+> 🔴 **离线镜像路线**：包里带的是**完整的 Docker 镜像归档**
+> （`fpk/app/image/picklight-<版本>-<架构>.tar.gz`，amd64 / arm64 各一份），
+> 安装时 `docker load -i` 直接载入，**不联网、不编译、不拉任何基础镜像**，装完即跑
+> —— 老 NAS / 家里拉不动 `registry-1.docker.io` 也能装。
+> 代价是包体从 ~270 KB 涨到 ~120 MB（主要就是 mihomo 内核）。
+
+包里**没有**源码、也没有 `fpk/Dockerfile`：镜像里的 `mdc-server` 是在开发机上用
+**zig 交叉编译**出来的真·静态 musl ELF（`PT_INTERP` 为空，scratch 镜像都跑得起来），
+内核是预先下好的 `mihomo-linux-<arch>`。这条链的好处是：
+
+- 打 fpk **不需要本机有 Docker，也不需要目标机是同一架构**（x86 开发机照样出 arm64 包）；
+- 用户在 NAS 上永远看不到 `base name (...) should not be blank` 这类就地构建错误。
+
+> 换机器 / 换架构打包时用 `bash tools/build_linux_cross.sh <amd64|arm64>`（默认两架构都出）；
+> 内核缺失时按 `tools/build.sh` 里的提示重新从 mihomo release 拉对应架构的
+> `mihomo-linux-<arch>-<版本>.gz` 放到 `build/kernel/` 下。
 
 安装时向导会问四件事，装完自动写进 `config.toml`，进界面不用再填一遍：
 
@@ -124,10 +139,13 @@ bash fpk-tools/build.sh              # 产出 dist/picklight-0.1.0.fpk（≈270 
 | CD2 地址 / 端口 | HTTP 地址，别写 `127.0.0.1`（Emby 那边也要能访问到） |
 | 访问端口 | 默认 9208，与 `manifest` / 桌面入口保持一致 |
 
-**镜像构建失败**时按报错文案走：提示「镜像源拉不动」就在飞牛「Docker → 设置 → 镜像加速」
-配一个加速源（一次配好永久生效）；提示「基础镜像」就到应用设置里换一个能用的地址。
-脚本会依次尝试 `docker.m.daocloud.io` / `docker.1ms.run` / `docker.fnnas.com` / 官方源，
-还会把 `mkdir ...: permission denied` 这类**权限死因**和镜像源问题区分开 —— 后者换源纯属浪费时间。
+**镜像载入失败**时（报错会直接打到 `TRIM_TEMP_LOGFILE` 并原样弹出）按文案走：
+提示「磁盘剩余空间」就清一层 Docker 镜像腾地方（两个架构共约 100 MB）；
+提示「找不到 docker / 载入失败」就到飞牛「Docker → 设置」确认 Docker 服务是开着的。
+因为压根不走 registry，这里**不存在换镜像源这一说**，别去折腾加速地址。
+
+> ⚠️ `cmd/common` 里选归档走的是 `picklight-*-<架构>.tar.gz` 通配（取版本号最大的一份）：
+> 归档名带 fpk 版本号，而运行时脚本读不到版本号，写死文件名必然找不到。
 
 > ⚠️ 容器起停（`docker compose up/down`）由本应用的 `cmd/*` 脚本自己管：
 > 包里刻意**没有** `docker/docker-compose.yaml`、也没声明 `docker-project`。
@@ -139,9 +157,15 @@ bash fpk-tools/build.sh              # 产出 dist/picklight-0.1.0.fpk（≈270 
 ```bash
 # 1) 改前端 → 必须先重新构建前端产物（build.rs 读的就是它）
 cd web && npm run build && cd ..
-# 2) 重新打 fpk（build.sh 会把 crates/ 与 web/dist 同步进 fpk/app/src，别手工维护第二份源码）
+# 2) 重新交叉编译静态二进制（改过 Rust 时；只改前端可跳过）
+bash tools/build_linux_cross.sh
+# 3) 重新打 fpk（默认走离线路线：自动重打镜像归档、再封包）
 bash fpk-tools/build.sh
 ```
+
+> 老版本是从 `fpk/app/src` 同步源码、在 NAS 上就地 `docker build` 的；
+> 那个分支已经删了，源码目录也不再进包。`bash fpk-tools/build.sh --source`
+> 保留着旧路径，仅作排障回退用。
 
 `build.sh` 结尾会跑一遍**契约自检**（`fpk-tools/check_contract.py`）：不装到真机上，
 用假 docker 在模拟的 `TRIM_*` 环境里把安装 / 改配置 / 升级 / 启停 / 卸载全跑一遍，

@@ -35,6 +35,16 @@ shells/mdc-mobile/gen/android/local.properties
 dist/
 tools_mumu_adb.exe
 
+# ── 交叉编译与离线镜像产物（开发机产物，NAS 上不参与构建）────────────────
+# zig 交叉编译出来的 Linux 静态二进制 + mihomo 内核都落在这里（两个架构共 ~180MB）
+build/
+# 由 fpk-tools/build_offline_image.sh 从上面的二进制重新拼出来的离线镜像归档，
+# 每次出包前会先清旧的再重打，不必入库
+fpk/app/image/
+# zig-cc wrapper 的调试日志
+*.log
+__pycache__/
+
 # ── 飞牛 fpk 包 ─────────────────────────────────────────────────────────
 # 源码是单一源：fpk/app/src 由 fpk-tools/build.sh 从仓库根同步过来（不手工维护第二份），
 # 图标与 fnpack 工具也都是构建产物 —— 全部不入库，否则改一处代码两边不同步。

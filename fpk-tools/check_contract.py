@@ -28,6 +28,12 @@ import shutil
 import subprocess
 import sys
 import tarfile
+# ⚠️ 必须在**模块顶层**导入：下面第 1b 段（离线镜像归档解析）在 main 里比
+#   第 193 行的 `import json` 更早用到 json。函数内任何位置的 import 都会把
+#   json 变成该函数的局部变量 ⇒ 报错
+#   `cannot access local variable 'json' where it is not associated with a value`
+#   —— 一不留神就把离线镜像那条最关键的断言整段验不了（假红）。
+import json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -77,7 +83,14 @@ case "$1" in
   # ⚠️ 必须是"可配的"：测 cmd/main status 的 exit 3 分支就得让它是 false，
   #    写死 true 的话「未运行返回 3」这条永远验不到（假绿）。
   inspect) echo "${FAKE_DOCKER_RUNNING:-true}"; exit 0 ;;
-  load) exit 0 ;;
+  # ⚠️ load 必须**同时**做两件事，缺一个就是假绿/假红：
+  #    (a) 记进 calls.log —— 否则「安装时 docker load 了离线镜像」这条断言永远验不到；
+  #    (b) touch 镜像标记 —— cmd/common 的 load_image() 判断「镜像是否已存在」是
+  #        靠 `docker image inspect`，而假 docker 的 image) 分支全靠 img_* 标记文件。
+  #        离线路线根本不跑 `compose build`（那个分支才 touch），标记永远不生成
+  #        ⇒ inspect 恒失败 ⇒ load_image 直接 fail ⇒ install/upgrade 退出码 1。
+  #        这是自检 harness 自己的洞，不是 fpk 的问题。
+  load) echo "docker load $*" >> "$ST/calls.log"; echo "Loaded image: ${img}"; touch "$ST/img_$(mark "$img")"; exit 0 ;;
   *) exit 0 ;;
 esac
 '''
@@ -141,6 +154,44 @@ def main():
         tops = sorted({n.split("/")[0] for n in t.getnames() if n.count("/") >= 1})
         check("docker" not in tops, f"app.tgz 顶层不含 docker/（顶层：{tops}）",
               f"app.tgz 顶层出现了 docker/：{tops}")
+        check("src" not in tops, f"app.tgz 顶层不含 src/（离线镜像包不该带源码：{tops}）",
+              f"app.tgz 仍带 src/（就地构建旧版才会这样：{tops}）")
+        check("Dockerfile" not in tops and "image" in tops,
+              f"离线镜像归档 image/ 已打进 app.tgz（顶层：{tops}）",
+              f"app.tgz 里没有 image/ 离线归档：{tops}")
+
+    # ── 离线镜像归档（装不联网的关键，必须能真的被 docker load 解析）──────
+    print("\n== 1b. 离线镜像归档 ==")
+    import gzip as _gz
+    img_tars = sorted(glob.glob(os.path.join(appdest, "image", "picklight-*.tar.gz")))
+    check(bool(img_tars), f"包内含离线镜像归档 {len(img_tars)} 个（{"、".join(os.path.basename(x) for x in img_tars)}）",
+          "包里没有离线镜像归档 —— 安装时又要去拉基础镜像，等于没离线")
+    for it in img_tars:
+        name = os.path.basename(it)
+        try:
+            with _gz.open(it, "rb") as g:
+                with tarfile.open(fileobj=g) as t2:
+                    names2 = set(t2.getnames())
+                    mf = json.loads(t2.extractfile("manifest.json").read().decode())
+                    entry = mf[0]
+                    cfg_ok = entry.get("Config") in names2
+                    layer_ok = all(l in names2 for l in entry.get("Layers", []))
+                    tags = entry.get("RepoTags", [])
+                    diff = json.loads(t2.extractfile(entry["Config"]).read().decode())["rootfs"]["diff_ids"]
+                    diff_ok = len(diff) == len(entry["Layers"]) and all(
+                        os.path.basename(l) in names2 for l in entry["Layers"])
+                    check(cfg_ok and layer_ok, f"{name}：manifest.json 的 Config/Layers 都在包里",
+                          f"{name}：manifest.json 指向的文件不在归档里")
+                    check(tags == ["picklight:latest"], f"{name}：RepoTags={tags}",
+                          f"{name}：RepoTags 不是 picklight:latest：{tags}")
+                    check(diff_ok, f"{name}：config.rootfs.diff_ids 与 Layers 一一对应",
+                          f"{name}：diff_ids 与 Layers 对不上（docker load 会校验失败）")
+                    arch = json.loads(t2.extractfile(entry["Config"]).read().decode()).get("architecture")
+                    check(arch in ("amd64", "arm64"), f"{name}：architecture={arch}",
+                          f"{name}：architecture 字段不对：{arch}")
+        except Exception as e:
+            check(False, f"{name} 是合法 gzip+tar 且 manifest.json 可解析",
+                  f"{name} 解析失败：{e}")
     res = read(os.path.join(appdest, "config", "resource"))
     check("docker-project" not in res, "config/resource 不声明 docker-project（否则安装会去 pull 本地 tag）",
           "config/resource 里还有 docker-project")
@@ -151,7 +202,9 @@ def main():
         p = os.path.join(appdest, "wizard", w)
         if not os.path.exists(p):
             continue
-        import json
+        # ⚠️ 这里**故意不写** `import json`：只要 main 里任何位置有 import/赋值，
+        #    json 就会在整个 main 作用域被判定为局部变量，第 1b 段（更早）用到它时
+        #    直接 UnboundLocalError。json 已在模块顶层导入过，直接全局用即可。
         try:
             data = json.loads(read(p))
             bad_rules = [i for it in data for i in it.get("items", [])
@@ -235,8 +288,10 @@ def main():
     check("MDC_CONFIG_PATH=/data" in comp, "compose 设了 MDC_CONFIG_PATH=/data", "compose 没设 MDC_CONFIG_PATH")
     check("MDC_NO_OPEN_BROWSER=1" in comp, "compose 设了 MDC_NO_OPEN_BROWSER=1（容器里没桌面浏览器）",
           "compose 没关掉自动开浏览器")
-    check("context: " in comp and "/src" in comp, "compose 的 build.context 指向 /src（就地构建）",
-          "compose 缺 build.context 或路径不对")
+    check("build:" not in comp and "dockerfile:" not in comp,
+          "compose 没有 build 段（离线镜像，安装时不构建）", "compose 还有 build 段（又要就地编译）")
+    check("image: picklight:latest" in comp, "compose 直接写 image: picklight:latest",
+          "compose 的 image 不对")
     check("propagation: rslave" in comp, "compose 网盘挂载带 rslave", "compose 没有 rslave")
     check("- \"/vol1/1000/CloudDrive:/vol1/1000/CloudDrive\"" in comp or
           "source: \"/vol1/1000/CloudDrive\"" in comp, "网盘挂载左右路径一致", "网盘挂载路径不一致")
@@ -253,7 +308,9 @@ def main():
           "首次安装播种出 [strm] root = /media", "播种的 config.toml 缺 strm.root")
     calls = os.path.join(state, "calls.log")
     calltxt = read(calls) if os.path.exists(calls) else ""
-    check("compose" in calltxt and "build" in calltxt, "安装时确实调了 docker compose build", "安装没构建镜像")
+    check("load" in calltxt, "安装时确实 docker load 了离线镜像", "安装没载入离线镜像")
+    check("build" not in calltxt, "安装时没有 docker compose build（不该再来一次编译）",
+          "安装竟然又去 build 了")
 
     print("\n== 4. 改配置（留空=保持原值）==")
     # ⚠️ 每个阶段用**独立的假 docker 状态目录**：calls.log 是追加写的，
@@ -276,7 +333,8 @@ def main():
     r = run("upgrade_callback", {"FAKE_DOCKER_STATE": posix(st_up)})
     check(r.returncode == 0, "upgrade_callback 退出码 0", f"upgrade_callback 失败：{r.returncode}")
     ctxt = read(os.path.join(st_up, "calls.log")) if os.path.exists(os.path.join(st_up, "calls.log")) else ""
-    check("build" in ctxt, "升级确实重建了镜像", "升级没重建镜像")
+    check("load" in ctxt, "升级重新 load 了离线镜像（镜像内容换了，必须强制覆盖旧 tag）",
+          "升级没重新载入镜像（用户会拿到旧程序）")
 
     print("\n== 6. 容器生命周期 ==")
     # 未运行 → exit 3（假 docker 的 inspect 被设成 false）

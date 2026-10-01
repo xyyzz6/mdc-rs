@@ -2,14 +2,34 @@
 ### 拾光 · PickLight —— 公用函数与变量
 ### 被 install_init / install_callback / config_callback / upgrade_callback /
 ### uninstall_* / main 统一 source，避免逻辑漂移。
+###
+### 🔴 离线镜像路线：镜像（alpine mini rootfs + 静态 mdc-server + mihomo）已随 fpk
+### 打包，安装时 `docker load -i` 载入，**不联网、不编译、不拉任何基础镜像**。
 
-# 镜像名（由 fpk-tools/build.sh 注入，必须与渲染出的 compose 里的 image 一致）
+# 镜像名（离线镜像 tar 里写的 RepoTags 就是它，compose 只写 image:，不再 build）
 IMAGE="picklight:latest"
 CONTAINER_NAME="picklight"
 
 APP_DIR="/var/apps/${TRIM_APPNAME}"
-# 源码目录：随 fpk 一起安装，首次安装时在 NAS 上本地构建镜像
-SRC_DIR="${TRIM_APPDEST}/src"
+# 🔴 离线镜像归档：随 fpk 一起安装，安装时 `docker load -i`，**全程不联网、不编译**。
+#    （旧版是「把源码打进包、在 NAS 上就地 docker build」，结果国内 NAS 必卡在拉
+#      rust:1-slim / debian 基础镜像，用户看到的就是 `base name (${BASE_IMAGE}) should
+#      not be blank` 或 registry-1.docker.io context deadline exceeded。）
+IMG_DIR="${TRIM_APPDEST}/image"
+# 🔴 归档名是「picklight-<fpk 版本>-<架构>.tar.gz」，而运行时的 cmd 脚本**读不到
+#    fpk 版本号**（manifest 是 appcenter 那边读的，cmd 只有 TRIM_* 环境变量）⇒
+#    写死 picklight-amd64.tar.gz 必然 [ ! -f ] 恒真，安装直接 fail「离线镜像归档丢失」。
+#    ⇒ 按架构通配找，取排序最后（版本号最大）的那一份。空则退回老的无版本命名。
+IMAGE_ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
+IMAGE_TAR=""
+for _c in "${IMG_DIR}"/picklight-*-${IMAGE_ARCH}.tar.gz; do
+    [ -f "${_c}" ] || continue
+    IMAGE_TAR="${_c}"
+done
+if [ -z "${IMAGE_TAR}" ]; then
+    IMAGE_TAR="${IMG_DIR}/picklight-${IMAGE_ARCH}.tar.gz"
+fi
+unset _c
 # 应用数据（config.toml / mdc.db / jwt_secret / 增量清单），位于 data-share，卸载后保留
 DATA_DIR="${APP_DIR}/shares/picklight/data"
 # ⚠️ 生成出来的 compose 刻意【不叫】docker/docker-compose.yaml、也不放在 docker/ 下：
@@ -88,17 +108,6 @@ DEFAULT_CD2_PORT="19798"
 DEFAULT_STRM_ROOT="/vol1/1000/Media/picklight-strm"
 DEFAULT_RSLAVE="true"
 
-# 基础镜像默认走国内加速源：国内 NAS 直连 registry-1.docker.io 基本必然
-# context deadline exceeded，默认值指向 Docker Hub 就是给用户埋雷。
-DEFAULT_BASE_IMAGE="docker.m.daocloud.io/library/debian:bookworm-slim"
-
-BASE_IMAGE_MIRRORS="
-docker.m.daocloud.io/library/debian:bookworm-slim
-docker.1ms.run/library/debian:bookworm-slim
-docker.fnnas.com/library/debian:bookworm-slim
-debian:bookworm-slim
-"
-
 fail() {
     echo "$1" > "${TRIM_TEMP_LOGFILE}"
     exit 1
@@ -158,9 +167,6 @@ save_conf() {
         echo "CD2_PORT=\"${CD2_PORT}\""
         echo "STRM_OUT=\"${STRM_OUT}\""
         echo "PORT=\"${PORT}\""
-        echo "BASE_IMAGE=\"${BASE_IMAGE}\""
-        # 上一次真正构建成功的那个基础镜像，下次优先复用它
-        echo "BASE_IMAGE_WORKING=\"${BASE_IMAGE_WORKING:-}\""
         echo "RSLAVE=\"${RSLAVE}\""
     } > "${CONF_FILE}" 2>/dev/null
     return 0
@@ -187,12 +193,6 @@ render_compose() {
     w="$(wiz strm_out)";    STRM_OUT="${w:-${STRM_OUT:-${DEFAULT_STRM_ROOT}}}"
     w="$(wiz port)";        PORT="${w:-${PORT:-${DEFAULT_PORT}}}"
 
-    if [ -n "${RENDER_FORCE_BASE_IMAGE:-}" ]; then
-        BASE_IMAGE="${RENDER_FORCE_BASE_IMAGE}"
-    else
-        w="$(wiz base_image)"; BASE_IMAGE="${w:-${BASE_IMAGE:-${DEFAULT_BASE_IMAGE}}}"
-    fi
-
     # rslave 开关
     w="$(wiz rslave)"
     if [ -n "${w}" ]; then
@@ -207,7 +207,6 @@ render_compose() {
     [ -z "${CD2_PORT}" ] && CD2_PORT="${DEFAULT_CD2_PORT}"
     [ -z "${STRM_OUT}" ] && STRM_OUT="${DEFAULT_STRM_ROOT}"
     [ -z "${PORT}" ] && PORT="${DEFAULT_PORT}"
-    [ -z "${BASE_IMAGE}" ] && BASE_IMAGE="${DEFAULT_BASE_IMAGE}"
 
     mkdir -p "$(dirname "${COMPOSE_FILE}")" || fail "无法写入 ${COMPOSE_FILE}"
 
@@ -220,12 +219,6 @@ render_compose() {
         echo "    image: ${IMAGE}"
         echo "    container_name: ${CONTAINER_NAME}"
         echo "    restart: unless-stopped"
-        echo "    # 源码随之安装到 ${SRC_DIR}，镜像不存在时 docker compose 会就地构建"
-        echo "    build:"
-        echo "      context: \"${SRC_DIR}\""
-        echo "      dockerfile: Dockerfile"
-        echo "      args:"
-        echo "        BASE_IMAGE: \"${BASE_IMAGE}\""
         echo "    environment:"
         echo "      - TZ=Asia/Shanghai"
         echo "      # 数据目录：config.toml / mdc.db / jwt_secret / 增量清单"
@@ -260,13 +253,6 @@ render_compose() {
     return 0
 }
 
-base_image_candidates() {
-    printf '%s\n' \
-        "$(wiz base_image)" \
-        "${BASE_IMAGE_WORKING:-}" \
-        ${BASE_IMAGE_MIRRORS}
-}
-
 # 首次安装：把向导里的网盘 / 输出目录写进 config.toml，用户进界面就不用再填一遍。
 # ⚠️ 只在 config.toml 不存在时播种 —— 之后一律以应用界面里的设置为准。
 seed_app_config() {
@@ -296,8 +282,10 @@ PERM_FATAL_RE="mkdir [^ ]+: permission denied|operation not permitted|read-only 
 PERM_HINT_RE="permission denied|operation not permitted|read-only file system|no space left"
 SOCK_PERM_RE="docker\.sock|connect to the Docker daemon socket"
 
-ensure_image() {
-    local force_build="${1:-0}"
+# 载入随包带来的离线镜像。
+#   force=1（升级）时重新 load —— 镜像内容变了，必须覆盖旧 tag。
+load_image() {
+    local force="${1:-0}"
 
     docker_env
 
@@ -306,61 +294,32 @@ ensure_image() {
 请先在「应用中心」里装好 / 启用 Docker，再重试安装。"
     fi
 
-    if [ "${force_build}" != "1" ] && docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-        RENDER_FORCE_BASE_IMAGE=""
+    if [ ! -f "${IMAGE_TAR}" ]; then
+        fail "离线镜像归档丢失：${IMAGE_TAR}。
+这个归档是本应用自带的（随 fpk 安装），请卸载后重新装一次最新包。"
+    fi
+
+    if [ "${force}" != "1" ] && docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+        echo "[picklight] 离线镜像 ${IMAGE} 已存在，跳过载入。"
         return 0
     fi
 
-    local cand out rc n=0 tried="" last_out=""
-    for cand in $(base_image_candidates); do
-        [ -z "${cand}" ] && continue
-        case " ${tried} " in *" ${cand} "*) continue ;; esac
-        tried="${tried} ${cand}"
-        n=$((n + 1))
-
-        RENDER_FORCE_BASE_IMAGE="${cand}"
-        # 构建阶段要用最终渲染出的 compose（context 指向 src、BASE_IMAGE 传进去）
-        render_compose
-
-        echo "[picklight] 第 ${n} 次尝试构建镜像，基础镜像：${cand}"
-        # 不能写成 `if ! docker compose build | tail`：管道会把退出码换成 tail 的
-        out="$(docker compose -f "${COMPOSE_FILE}" build 2>&1)"; rc=$?
-        echo "${out}" | tail -12
-
-        if [ ${rc} -eq 0 ] && docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-            RENDER_FORCE_BASE_IMAGE=""
-            BASE_IMAGE_WORKING="${cand}"
-            save_conf
-            echo "[picklight] 镜像 ${IMAGE} 构建成功（基础镜像 ${cand}）。"
-            return 0
-        fi
-
-        last_out="${out}"
-        if echo "${out}" | tail -3 | grep -qiE "${PERM_FATAL_RE}"; then
-            warn "第一条错误就是文件系统/权限问题，换镜像源不会有帮助，停止重试。"
-            break
-        fi
-        warn "基础镜像 ${cand} 拉取/构建失败，换下一个镜像源重试。"
-    done
-
-    RENDER_FORCE_BASE_IMAGE=""
-    local last3
-    last3="$(echo "${last_out}" | tail -3 | tr '\n' ' ')"
-    if echo "${last3}" | grep -qiE "${SOCK_PERM_RE}"; then
-        fail "镜像构建失败：这是 docker socket 权限问题，跟「镜像源拉不动」完全不同 ——
-fnOS 上 /var/run/docker.sock 默认 root:docker 0660，本包的 fpk/config/privilege
-必须带 join-groups: [\"docker\"]（本包已带）。若仍然报这条错，请到「应用中心」
-卸载本应用后重装新包 —— join-groups 是 install 阶段由 appcenter 建的，单纯升级未必重做。"
+    echo "[picklight] 载入离线镜像 ${IMAGE_TAR}"
+    # 管道会吞退出码 ⇒ 先拿 rc 再展示
+    local out rc
+    out="$(docker load -i "${IMAGE_TAR}" 2>&1)"; rc=$?
+    echo "${out}" | tail -6
+    if [ ${rc} -ne 0 ] || ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+        fail "离线镜像载入失败（${IMAGE_TAR}）。
+请到飞牛「Docker → 设置」确认 Docker 服务正常、磁盘有足够剩余空间（镜像约需 100MB），然后卸载重装本应用。"
     fi
-    if echo "${last3}" | grep -qiE "${PERM_HINT_RE}"; then
-        fail "镜像构建失败：这【不是】镜像源的问题，docker 在真正干活之前就被文件权限挡住了。
-请在飞牛「Docker → 设置」里检查数据目录是否可写，或卸载后重装本应用。"
-    fi
-    fail "镜像构建失败：已尝试 ${n} 个基础镜像源，最后一条错误：${last3}
-请二选一：
-  1) 在飞牛「Docker → 设置 → 镜像加速」里配一个能用的加速源（一次配好永久生效）；
-  2) 在应用的「设置」里把『基础镜像』改成你 NAS 能访问的地址，例如
-     docker.1ms.run/library/debian:bookworm-slim"
+    echo "[picklight] 离线镜像 ${IMAGE} 载入完成。"
+    return 0
+}
+
+# 兼容旧调用点：ensure_image <force>
+ensure_image() {
+    load_image "${1:-0}"
 }
 
 # 真正拉起容器
