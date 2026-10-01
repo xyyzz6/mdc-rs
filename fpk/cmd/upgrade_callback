@@ -1,0 +1,22 @@
+#!/bin/bash
+### 升级后执行：
+###   1. 读回升级前保存的配置（否则向导值会被打回默认，用户的网盘目录就丢了）
+###   2. 源码目录已换新，强制重建镜像
+###   3. 重建容器
+### 数据目录位于 data-share，升级不会动，config.toml / mdc.db / 增量清单都在。
+
+source "$(dirname "$0")/common"
+
+: > "${WARN_FILE}" 2>/dev/null
+
+load_conf
+render_compose
+
+try_ensure_dir "${MOUNT_ROOT}"
+try_ensure_dir "${STRM_OUT}"
+chmod -R 777 "${DATA_DIR}" 2>/dev/null
+
+ensure_image 1
+recreate_container
+
+exit 0

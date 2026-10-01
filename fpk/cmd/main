@@ -1,0 +1,35 @@
+#!/bin/bash
+### 拾光 · PickLight —— 应用启停与状态检查。
+### ⚠️ 本应用刻意没有在 config/resource 里声明 docker-project，包里也不放
+### app/docker/docker-compose.yaml（原因见 cmd/common 里 COMPOSE_FILE 的说明），
+### 所以 appcenter 完全不会碰我们的容器，起停必须自己动手。
+###   exit 0 = 运行中，exit 3 = 未运行（appcenter 的约定）
+
+source "$(dirname "$0")/common"
+
+case $1 in
+start)
+    if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        docker start "${CONTAINER_NAME}" >/dev/null 2>&1
+    else
+        # 容器还没建过（或刚被卸载清理）：按当前配置重新渲染并拉起
+        load_conf
+        render_compose >/dev/null 2>&1
+        _do_up >/dev/null 2>&1
+    fi
+    exit 0
+    ;;
+stop)
+    docker stop "${CONTAINER_NAME}" >/dev/null 2>&1
+    exit 0
+    ;;
+status)
+    if docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null | grep -q true; then
+        exit 0
+    fi
+    exit 3
+    ;;
+*)
+    exit 1
+    ;;
+esac

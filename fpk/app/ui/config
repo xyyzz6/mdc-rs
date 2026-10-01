@@ -1,0 +1,13 @@
+{
+    ".url": {
+        "picklight.Application": {
+            "title": "拾光 PickLight",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "http",
+            "port": "9208",
+            "url": "/",
+            "allUsers": true
+        }
+    }
+}

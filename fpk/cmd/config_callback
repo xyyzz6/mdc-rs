@@ -1,0 +1,19 @@
+#!/bin/bash
+### 在应用设置页修改配置后执行：重新渲染 compose 并重建容器。
+### 先把上次生效的值读回来，这样向导里留空的项不会被默认值覆盖。
+
+source "$(dirname "$0")/common"
+
+: > "${WARN_FILE}" 2>/dev/null
+
+load_conf
+render_compose
+
+try_ensure_dir "${MOUNT_ROOT}"
+try_ensure_dir "${STRM_OUT}"
+chmod -R 777 "${DATA_DIR}" 2>/dev/null
+
+# 改端口或路径都不需要重新构建镜像，直接重建容器即可
+recreate_container
+
+exit 0

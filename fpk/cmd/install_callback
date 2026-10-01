@@ -1,0 +1,28 @@
+#!/bin/bash
+### 安装向导完成后执行：
+###   1. 按向导填写的内容渲染 docker-compose.yaml
+###   2. 准备数据目录 / CD2 挂载目录 / strm 输出目录
+###   3. 用向导里的值播种初始 config.toml（用户进界面不用再填一遍）
+###   4. 确保镜像存在（在 NAS 上就地构建），拉起容器
+
+source "$(dirname "$0")/common"
+
+: > "${WARN_FILE}" 2>/dev/null
+
+# 1. 渲染 compose（首次安装：向导值优先，缺项用默认值）
+render_compose
+
+# 2. 目录准备
+ensure_dir "${DATA_DIR}"
+chmod -R 777 "${DATA_DIR}" 2>/dev/null
+try_ensure_dir "${MOUNT_ROOT}"
+try_ensure_dir "${STRM_OUT}"
+
+# 3. 播种初始配置
+seed_app_config
+
+# 4. 构建镜像 + 拉起容器
+ensure_image 0
+recreate_container
+
+exit 0

@@ -1,0 +1,18 @@
+{
+  "data-share": {
+    "shares": [
+      {
+        "name": "picklight",
+        "permission": {
+          "rw": ["picklight"]
+        }
+      },
+      {
+        "name": "picklight/data",
+        "permission": {
+          "rw": ["picklight"]
+        }
+      }
+    ]
+  }
+}

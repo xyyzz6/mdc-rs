@@ -174,7 +174,14 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors_layer());
 
     let dist = web_dist_dir();
-    if dist.join("index.html").exists() {
+    // embed-web：前端已在二进制里，优先内嵌，磁盘目录次选（便于热更新调 UI）
+    if has_embedded_web() {
+        Router::new()
+            .merge(api)
+            .fallback(embedded_handler)
+            .layer(TraceLayer::new_for_http())
+            .with_state(state)
+    } else if dist.join("index.html").exists() {
         let index = ServeFile::new(dist.join("index.html"));
         let static_svc = ServeDir::new(&dist)
             .append_index_html_on_directories(true)
@@ -206,6 +213,13 @@ pub async fn serve(state: AppState) -> Result<()> {
         .parse()?;
     tracing::info!("mdc-server v{VERSION} listening on http://{bind}");
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    // 浏览器只在监听地址是本机时打开（Docker 里 bind 是 0.0.0.0，天然跳过）
+    if bind.ip().is_loopback() {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            open_browser(&format!("http://{bind}"));
+        });
+    }
     axum::serve(listener, build_router(state)).await?;
     Ok(())
 }
@@ -1451,4 +1465,72 @@ fn web_dist_dir() -> PathBuf {
     std::env::var("MDC_WEB_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./web/dist"))
+}
+
+/// 单文件 exe（`--features embed-web`）的前端在编译期就进了二进制。
+/// 文件表由 build.rs 生成到 OUT_DIR（同目录下 `#[path]` 可直接指过去）。
+#[cfg(feature = "embed-web")]
+pub mod embedded {
+    // ⚠️ #[path] 只吃字符串字面量（concat! 会报 "malformed path attribute input"），
+    // 所以这里用 include! 把 build.rs 生成的资产表插进来。
+    include!(concat!(env!("OUT_DIR"), "/web/web_mod.rs"));
+}
+
+// ⚠️ build_router 里会无条件调用这两个，**每个都得自己带 cfg** ——
+// 只在定义处加 cfg、调用处漏了，关掉 embed-web 编的时候就是 "cannot find function"。
+#[cfg(feature = "embed-web")]
+fn has_embedded_web() -> bool {
+    !embedded::FILES.is_empty()
+}
+
+#[cfg(not(feature = "embed-web"))]
+fn has_embedded_web() -> bool {
+    false
+}
+
+/// 内嵌静态服务：命中文件按类型返回，其余一律回 index.html（SPA 路由）。
+/// 没开 embed-web 时退化成磁盘目录那套。
+#[cfg(feature = "embed-web")]
+async fn embedded_handler(uri: axum::http::Uri) -> Response {
+    use axum::body::Body;
+
+    let path = uri.path().trim_start_matches('/');
+    let hit = embedded::FILES.iter().find(|(name, _, _)| *name == path);
+    let (bytes, mime) = match hit {
+        Some((_, m, b)) => (*b, *m),
+        // 未知路径（前端路由 /settings 之类）回首页，交给前端处理
+        None => match embedded::FILES.iter().find(|(n, _, _)| *n == "index.html") {
+            Some((_, m, b)) => (*b, *m),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "内嵌前端缺失".to_string(),
+                )
+                    .into_response();
+            }
+        },
+    };
+    ([(header::CONTENT_TYPE, mime)], Body::from(bytes)).into_response()
+}
+
+#[cfg(not(feature = "embed-web"))]
+async fn embedded_handler(uri: axum::http::Uri) -> Response {
+    spa_fallback(uri).await
+}
+
+/// 启动后试着把浏览器带到界面上（单文件 exe 双击即用，省一次手抄地址）。
+/// 任何失败都静默：Docker / 无桌面环境里这个命令根本不存在。
+fn open_browser(url: &str) {
+    if std::env::var("MDC_NO_OPEN_BROWSER").is_ok() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }

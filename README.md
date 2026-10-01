@@ -1,4 +1,4 @@
-# MDC-RS
+# 拾光 · PickLight
 
 Yet another Movie Data Capture tool —— 一套 Rust 核心覆盖三端：
 
@@ -9,6 +9,10 @@ Yet another Movie Data Capture tool —— 一套 Rust 核心覆盖三端：
 | 📱 **Android APK** | 完整引擎跑在手机本地，离线可用（Tauri 2） |
 
 架构与设计细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+> 项目原名 **MDC-RS**，2026-10 更名为 **拾光 · PickLight**（安卓包名
+> `com.picklight.app`）。APK/桌面走「首次启动时自动把旧 `com.mdcrs.mobile`
+> 数据目录（config / 数据库 / CD2 home）拷到新目录」，老机器升级不用重新配置。
 
 ## 快速开始（本机开发）
 
@@ -32,6 +36,8 @@ cargo run -p mdc-server
 | `MDC_BIND` | `127.0.0.1:9208` | 监听地址（Docker 里用 `0.0.0.0:9208`） |
 | `MDC_WEB_DIST` | `./web/dist` | 前端静态文件目录 |
 | `MDC_USERNAME` / `MDC_PASSWORD` | — | 两者都设才启用登录鉴权（只覆盖内存，不落盘） |
+| `MDC_NO_OPEN_BROWSER` | — | 设任意值就别自动开浏览器（Docker/无桌面环境） |
+| `MDC_PROXY_KERNEL` | — | 代理内核路径；不设就按「exe 同目录 → PATH」探测 |
 
 ## 代理
 
@@ -77,7 +83,7 @@ MDC_PROXY=socks5://127.0.0.1:10808 \
 
 ```bash
 cd docker
-docker compose up -d        # http://NAS_IP:9208
+docker compose up -d        # http://NAS_IP:9208（服务名/镜像都叫 picklight）
 ```
 
 **先验证再上线**（推荐）：镜像「构建成功」不代表能用 —— 最典型的坑是
@@ -97,22 +103,107 @@ DOCKER="sudo docker" bash docker/verify.sh
 > 覆盖到容器的 Linux 环境上（Windows 上装的是 win32-x64 原生二进制），
 > esbuild/rollup 直接跑不起来。
 
-## Windows exe
+## 飞牛 fnOS（.fpk）
+
+打包 → 得到 `dist/picklight-<版本>.fpk`，在飞牛「应用中心 → 本地安装」里选这个文件装上就行：
 
 ```bash
-cargo build --release -p mdc-server
-# target/release/mdc-server.exe + web/dist 一起分发即可
+bash fpk-tools/build.sh              # 产出 dist/picklight-0.1.0.fpk（≈270 KB）
 ```
+
+包里带的是**源码 + 前端产物**，不在包里塞镜像：安装时镜像由你的 NAS 就地构建
+（`docker compose build`，一般 3-8 分钟，第一次最慢）。这样做的好处是改一行代码
+重新打 fpk 就行，不用本机有 Docker，也不用把几百 MB 镜像塞进包里。
+
+安装时向导会问四件事，装完自动写进 `config.toml`，进界面不用再填一遍：
+
+| 向导项 | 说明 |
+| --- | --- |
+| CD2 挂载根目录 | 网盘目录**在容器里的**绝对路径，左右两侧必须一致；勾了 rslave 后 CD2 掉盘重挂容器能自动看到 |
+| strm / NFO 输出目录 | 容器内固定落到 `/media`，映射到 NAS 上的目录给 Emby、Jellyfin 扫 |
+| CD2 地址 / 端口 | HTTP 地址，别写 `127.0.0.1`（Emby 那边也要能访问到） |
+| 访问端口 | 默认 9208，与 `manifest` / 桌面入口保持一致 |
+
+**镜像构建失败**时按报错文案走：提示「镜像源拉不动」就在飞牛「Docker → 设置 → 镜像加速」
+配一个加速源（一次配好永久生效）；提示「基础镜像」就到应用设置里换一个能用的地址。
+脚本会依次尝试 `docker.m.daocloud.io` / `docker.1ms.run` / `docker.fnnas.com` / 官方源，
+还会把 `mkdir ...: permission denied` 这类**权限死因**和镜像源问题区分开 —— 后者换源纯属浪费时间。
+
+> ⚠️ 容器起停（`docker compose up/down`）由本应用的 `cmd/*` 脚本自己管：
+> 包里刻意**没有** `docker/docker-compose.yaml`、也没声明 `docker-project`。
+> 否则应用中心会按约定路径去 `pull` 一个只存在于本地的 tag，
+> 报出来的错是 `registry-1.docker.io ... context deadline exceeded`，跟真实原因完全无关。
+
+### 改代码后重新出包
+
+```bash
+# 1) 改前端 → 必须先重新构建前端产物（build.rs 读的就是它）
+cd web && npm run build && cd ..
+# 2) 重新打 fpk（build.sh 会把 crates/ 与 web/dist 同步进 fpk/app/src，别手工维护第二份源码）
+bash fpk-tools/build.sh
+```
+
+`build.sh` 结尾会跑一遍**契约自检**（`fpk-tools/check_contract.py`）：不装到真机上，
+用假 docker 在模拟的 `TRIM_*` 环境里把安装 / 改配置 / 升级 / 启停 / 卸载全跑一遍，
+断言 compose 的端口与挂载、播种的 `config.toml`、脚本权限 0755 与 LF、manifest 与
+桌面入口端口一致等三十来条 —— 「装不上」的头号死因全部机器验掉，不靠人眼。
+
+## Windows exe（单文件版）
+
+```bash
+bash tools/package_exe.sh
+# → dist/picklight-<版本>-windows-x64.zip
+#   内含 PickLight.exe（前端已编进二进制，不需要 web-dist 目录）+ mihomo.exe（代理内核）
+```
+
+`--features embed-web` 会把 `web/dist` 在**编译期**打进 exe（build.rs 生成一张
+资产表 + `include!` 进来），所以双击就跑、拷给别人也不缺文件：
+
+```bash
+cargo build --release -p mdc-server --features embed-web
+```
+
+- 内嵌前端优先于磁盘目录：真要热改 UI 不重新打包，直接给 exe 旁边的
+  `web/dist` 目录（`MDC_WEB_DIST` 或当前目录下的 `web/dist`）。
+- 启动后自动开浏览器（`MDC_NO_OPEN_BROWSER=1` 关掉）；只在本机地址监听时才开。
+- 代理内核按「exe 同目录 → `MDC_PROXY_KERNEL` → PATH」探测，所以 zip 里
+  带上 `mihomo.exe`；单独拷走 exe 不联网刮削仍然能用，只是内置内核找不着。
+- 打包脚本会做**字节级校验**：grep exe 里的前端指纹串，防止 build.rs 用的
+  是旧 `web/dist`（改完前端必须 `touch crates/mdc-server/build.rs` 才会重跑）。
 
 ## Android APK
 
-完整引擎（刮削/整理/数据库/UI）全部跑在手机上，构建需要 Android SDK/NDK：
+完整引擎（刮削/整理/数据库/CD2 网盘 + mihomo 代理内核 + UI）全部跑在手机上，
+产物是纯 arm64 的 debug APK，约 56MB。
 
 ```bash
-rustup target add aarch64-linux-android
-cargo install tauri-cli --version '^2'
-cd shells/mdc-mobile && cargo tauri android init && cargo tauri android build --apk
+bash tools/build_apk.sh          # 构建 + 契约校验 + dist/picklight-<版本>-arm64-debug.apk
+bash tools/build_apk.sh --skip-build   # 只校验已有产物（快）
+python tools/check_apk.py dist/picklight-<版本>-arm64-debug.apk <版本>
 ```
+
+需要：Android SDK（`%LOCALAPPDATA%\Android\Sdk`）+ NDK + JDK 17 + `rustup target add aarch64-linux-android`。
+脚本自己定位 JDK/SDK/NDK，本机 `JAVA_HOME`/`ANDROID_HOME` 默认是空的。
+
+**内置的三根内核**（`jniLibs/arm64-v8a/`，共 ~129MB）：`libclouddrive.so`（CloudDrive2
+官方安卓引擎，端口 19798）、`libmihomo.so`（代理内核）、`libmdc_mobile.so`（本 App 的 Rust 壳）。
+它们都在 `app/.gitignore` 里，**不进版本库**（换机器重建前从参考工程抽出来放进 `jniLibs/` 即可）。
+
+**三条踩过的坑**（`tools/build_apk.sh` 里已固化）：
+1. tauri CLI 会把 `.so` 往 jniLibs 拷成 **0 字节** ⇒ 脚本手动 `cp` 并跳过 gradle 的 rust 任务
+   （`-x rustBuildArm64Debug -x rustBuildUniversalDebug`）；APK 内 `.so` 为 0 字节 = 装上秒崩。
+2. **手动 `gradlew assemble` 不会拷前端**：前端是 tauri CLI 在 `tauri android build` 时放进
+   `assets/app/` 的，直接 gradlew 打出来的 APK **连 index.html 都没有**（UI 全白，外面看只是"打不开"）。
+   脚本补上了这一步（`web/dist → app/src/main/assets/app/`）。
+3. 全局 cargo config 的 `[env] CC=w64devkit gcc` 会污染 aarch64 交叉编译 ⇒ 显式指定 NDK 的 `CC`/`AR`。
+
+校验是字节级的（`tools/check_apk.py`）：三个 `.so` 必须 ELF 且体积达标、`assets/app/index.html`
+在包里、**包内前端 hash 与当前 `web/dist` 一致**（防打旧前端）、`applicationId`/标题与配置对齐；
+`app 标题` 这条只能靠 `aapt2 dump badging` 读（二进制 manifest 里 grep 不到，标题其实在
+`res/values/strings.xml`）。
+
+本机验证：adb 装包 → 冷启截图 → `adb forward tcp:19208 tcp:9208` → `/api/health` 返回
+`{"ok":true,"version":"..."}`，设置页显示「内置 CD2 引擎 · 运行中」。
 
 CI（`.github/workflows/release.yml`）在打 tag 时自动产出三端制品。
 
@@ -145,7 +236,7 @@ CI（`.github/workflows/release.yml`）在打 tag 时自动产出三端制品。
 几小时等待、还容易被网盘风控），元数据匹配率也低。`.strm` 是几十字节的文本、
 里面写播放地址，Emby 扫到它只读文本、不碰视频 —— 扫库从几小时变成几分钟。
 
-mdc-rs **不自己实现网盘协议**，而是读 CloudDrive2 挂载出来的目录，
+拾光 **不自己实现网盘协议**，而是读 CloudDrive2 挂载出来的目录，
 按 CD2 直链格式写 `.strm`：
 
 ```toml

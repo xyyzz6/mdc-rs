@@ -1,0 +1,8 @@
+#!/bin/bash
+### 卸载前执行：先把容器停掉。
+### 因为这个应用没有声明 docker-project，appcenter 不会替我们停容器。
+source "$(dirname "$0")/common"
+
+docker stop "${CONTAINER_NAME}" >/dev/null 2>&1
+
+exit 0

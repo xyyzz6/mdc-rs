@@ -1,0 +1,8 @@
+#!/bin/bash
+### 升级前执行：记录当前配置，供升级后复用。
+
+source "$(dirname "$0")/common"
+
+load_conf
+
+exit 0

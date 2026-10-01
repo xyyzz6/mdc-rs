@@ -1,0 +1,14 @@
+#!/bin/bash
+### 卸载后执行：清掉容器（但保留镜像与数据）。
+### 数据目录在 data-share 里，卸载后保留，重装能直接接着用。
+### 扫出来的 strm / nfo / 海报是用户资产，一律不碰。
+
+source "$(dirname "$0")/common"
+
+# 容器名是固定的，不清掉重装会撞名
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1
+
+### 如需彻底清理，可在文件管理里自行删除数据目录
+###   /var/apps/picklight/shares/picklight/data
+
+exit 0

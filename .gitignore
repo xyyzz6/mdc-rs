@@ -59,3 +59,6 @@ shells/mdc-mobile/gen/android/tauri.settings.gradle
 
 # tauri 构建时生成的能力 schema（可随时再生）
 shells/mdc-mobile/gen/schemas/
+
+# APK 构建时拷进来的前端产物（每次改前端都会变，别进库）
+shells/mdc-mobile/gen/android/app/src/main/assets/app/

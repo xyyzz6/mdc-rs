@@ -25,3 +25,9 @@ tower-http = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 sqlx = { workspace = true }
+# 内嵌前端（单文件 exe 用）：编译期把 web/dist 打进二进制
+include_dir = { workspace = true, optional = true }
+
+[features]
+# 把 web/dist 编进 exe：产出单文件、双击即跑的 Windows 版
+embed-web = ["dep:include_dir"]

@@ -1,0 +1,395 @@
+#!/bin/bash
+### 拾光 · PickLight —— 公用函数与变量
+### 被 install_init / install_callback / config_callback / upgrade_callback /
+### uninstall_* / main 统一 source，避免逻辑漂移。
+
+# 镜像名（由 fpk-tools/build.sh 注入，必须与渲染出的 compose 里的 image 一致）
+IMAGE="picklight:latest"
+CONTAINER_NAME="picklight"
+
+APP_DIR="/var/apps/${TRIM_APPNAME}"
+# 源码目录：随 fpk 一起安装，首次安装时在 NAS 上本地构建镜像
+SRC_DIR="${TRIM_APPDEST}/src"
+# 应用数据（config.toml / mdc.db / jwt_secret / 增量清单），位于 data-share，卸载后保留
+DATA_DIR="${APP_DIR}/shares/picklight/data"
+# ⚠️ 生成出来的 compose 刻意【不叫】docker/docker-compose.yaml、也不放在 docker/ 下：
+#    飞牛 appcenter 是按约定路径探测 docker 项目的（app/docker/docker-compose.yaml →
+#    ${TRIM_APPDEST}/docker/docker-compose.yaml）。只要那个文件存在，安装时它就可能
+#    替我们执行 docker compose pull，而镜像 tag 是 NAS 本地构建的、远端根本不存在，
+#    报错就是：Get "https://registry-1.docker.io/v2/": context deadline exceeded。
+#    换到 app 根目录并改个名字，从根上避开这个探测。
+COMPOSE_FILE="${TRIM_APPDEST}/picklight-compose.yaml"
+CONF_FILE="${TRIM_PKGETC}/picklight.conf"
+WARN_FILE="${TRIM_PKGETC}/picklight.warn"
+
+# 容器内服务端口（compose 端口映射也跟着它，manifest 的 service_port 默认 9208）
+INTERNAL_PORT="9208"
+# 容器内 strm 落点固定为 /media，宿主侧由向导指定（左右路径可以不同）
+CONTAINER_STRM="/media"
+
+# ── Docker CLI 运行环境兜底 ─────────────────────────────────────────────
+# ⚠️ 实测坑：config/privilege 里声明了 run-as=package，飞牛会以包用户执行
+#    生命周期脚本，并把 HOME 设成 /home/<应用名>。这个目录不存在、包用户也
+#    建不出来（/home 只有 root 能写）。docker / docker compose 真正干活之前
+#    要先往 $HOME 写 config 与 buildx 状态，MkdirAll 一失败整轮就夭折，
+#    报出来的却是 "mkdir /home/picklight: permission denied" —— 看着像
+#    「镜像源拉不下来」，极难定位。可写性必须**真写一个文件**来验证
+#    （`[ -d ]` 判断不算数）。
+_docker_home_writable() {
+    [ -n "$1" ] && [ -d "$1" ] || return 1
+    local probe="$1/.wprobe.$$"
+    ( umask 077; : > "${probe}" ) 2>/dev/null || return 1
+    rm -f "${probe}" 2>/dev/null
+    return 0
+}
+
+_docker_home_try() {
+    [ -n "$1" ] || return 1
+    mkdir -p "$1/.docker" 2>/dev/null
+    _docker_home_writable "$1" || return 1
+    _docker_home_writable "$1/.docker" || return 1
+    return 0
+}
+
+docker_env() {
+    DOCKER_ORIG_HOME="${HOME:-}"
+    DOCKER_HOME_USED=""
+
+    if [ -n "${DOCKER_ORIG_HOME}" ] && [ ! -e "${DOCKER_ORIG_HOME}" ]; then
+        mkdir -p "${DOCKER_ORIG_HOME}" 2>/dev/null \
+            && chmod 777 "${DOCKER_ORIG_HOME}" 2>/dev/null
+    fi
+
+    local base cand
+    for base in "${TRIM_APPDEST:-}" "${TRIM_PKGETC:-}" \
+                "${APP_DIR}" "${TMPDIR:-/tmp}"; do
+        case "${base}" in ""|"/") continue ;; esac
+        cand="${base}/.docker-home"
+        if _docker_home_try "${cand}"; then
+            export HOME="${cand}"
+            # docker CLI 优先读 DOCKER_CONFIG，压根不会去碰 $HOME —— 双保险
+            export DOCKER_CONFIG="${cand}/.docker"
+            export XDG_CONFIG_HOME="${cand}/.config"
+            export XDG_CACHE_HOME="${cand}/.cache"
+            DOCKER_HOME_USED="${cand}"
+            return 0
+        fi
+    done
+
+    warn "找不到可写的 HOME 目录，docker 可能仍然拿不到可用的配置目录（当前 HOME=${DOCKER_ORIG_HOME:-空}）。"
+    return 0
+}
+
+# ── 向导字段 ────────────────────────────────────────────────────────────
+DEFAULT_PORT="9208"
+DEFAULT_MOUNT_ROOT="/vol1/1000/CloudDrive"
+DEFAULT_CD2_HOST="192.168.1.15"
+DEFAULT_CD2_PORT="19798"
+DEFAULT_STRM_ROOT="/vol1/1000/Media/picklight-strm"
+DEFAULT_RSLAVE="true"
+
+# 基础镜像默认走国内加速源：国内 NAS 直连 registry-1.docker.io 基本必然
+# context deadline exceeded，默认值指向 Docker Hub 就是给用户埋雷。
+DEFAULT_BASE_IMAGE="docker.m.daocloud.io/library/debian:bookworm-slim"
+
+BASE_IMAGE_MIRRORS="
+docker.m.daocloud.io/library/debian:bookworm-slim
+docker.1ms.run/library/debian:bookworm-slim
+docker.fnnas.com/library/debian:bookworm-slim
+debian:bookworm-slim
+"
+
+fail() {
+    echo "$1" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+}
+
+warn() {
+    echo "[WARN] $1"
+    echo "$1" >> "${WARN_FILE}" 2>/dev/null
+}
+
+# 读向导里的一个字段。
+# ⚠️ 两种命名约定都见过：wizard/*.json 里的 field 已经写成 "wizard_xxx"，
+#    而 fnOS 有可能再自动补一个前缀 → 实际变量名变成 wizard_wizard_xxx。
+#    两个名字都读，谁有值用谁，避免用户填的东西被静默忽略、全部落回默认值。
+wiz() {
+    local n1="wizard_$1" n2="wizard_wizard_$1"
+    local v1="" v2=""
+    eval "v1=\${${n1}:-}"
+    eval "v2=\${${n2}:-}"
+    if [ -n "${v1}" ]; then printf '%s' "${v1}"; else printf '%s' "${v2}"; fi
+}
+
+ensure_dir() {
+    local dir="$1"
+    [ -z "$dir" ] && return 0
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir" 2>/dev/null || fail "无法创建目录：${dir}。请先在「文件管理」里手工建好该目录，再重试安装。"
+    fi
+    return 0
+}
+
+try_ensure_dir() {
+    local dir="$1"
+    [ -z "$dir" ] && return 0
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir" 2>/dev/null
+        if [ ! -d "$dir" ]; then
+            warn "目录 ${dir} 不存在且创建失败（权限不足），容器启动时将由 Docker 自动创建，属主为 root。"
+        fi
+    fi
+    return 0
+}
+
+load_conf() {
+    if [ -f "${CONF_FILE}" ]; then
+        # shellcheck disable=SC1090
+        . "${CONF_FILE}"
+    fi
+    return 0
+}
+
+save_conf() {
+    mkdir -p "$(dirname "${CONF_FILE}")" 2>/dev/null
+    {
+        echo "MOUNT_ROOT=\"${MOUNT_ROOT}\""
+        echo "CD2_HOST=\"${CD2_HOST}\""
+        echo "CD2_PORT=\"${CD2_PORT}\""
+        echo "STRM_OUT=\"${STRM_OUT}\""
+        echo "PORT=\"${PORT}\""
+        echo "BASE_IMAGE=\"${BASE_IMAGE}\""
+        # 上一次真正构建成功的那个基础镜像，下次优先复用它
+        echo "BASE_IMAGE_WORKING=\"${BASE_IMAGE_WORKING:-}\""
+        echo "RSLAVE=\"${RSLAVE}\""
+    } > "${CONF_FILE}" 2>/dev/null
+    return 0
+}
+
+is_true() {
+    case "$(echo "${1:-}" | tr 'A-Z' 'a-z')" in
+        1|true|yes|on|enable|enabled) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# 渲染 docker-compose.yaml
+# 取值优先级：向导输入 > 已保存配置 > 默认值（「留空=保持原值」与「首次安装=默认值」同时成立）
+render_compose() {
+    local w
+    w="$(wiz mount_root)"; MOUNT_ROOT="${w:-${MOUNT_ROOT:-${DEFAULT_MOUNT_ROOT}}}"
+    w="$(wiz cd2_host)";    CD2_HOST="${w:-${CD2_HOST:-${DEFAULT_CD2_HOST}}}"
+    w="$(wiz cd2_port)";    CD2_PORT="${w:-${CD2_PORT:-${DEFAULT_CD2_PORT}}}"
+    w="$(wiz strm_out)";    STRM_OUT="${w:-${STRM_OUT:-${DEFAULT_STRM_ROOT}}}"
+    w="$(wiz port)";        PORT="${w:-${PORT:-${DEFAULT_PORT}}}"
+
+    if [ -n "${RENDER_FORCE_BASE_IMAGE:-}" ]; then
+        BASE_IMAGE="${RENDER_FORCE_BASE_IMAGE}"
+    else
+        w="$(wiz base_image)"; BASE_IMAGE="${w:-${BASE_IMAGE:-${DEFAULT_BASE_IMAGE}}}"
+    fi
+
+    # rslave 开关
+    w="$(wiz rslave)"
+    if [ -n "${w}" ]; then
+        if is_true "${w}"; then RSLAVE="true"; else RSLAVE="false"; fi
+    else
+        RSLAVE="${RSLAVE:-${DEFAULT_RSLAVE}}"
+    fi
+    [ "${RENDER_NO_RSLAVE:-0}" = "1" ] && RSLAVE="false"
+
+    [ -z "${MOUNT_ROOT}" ] && MOUNT_ROOT="${DEFAULT_MOUNT_ROOT}"
+    [ -z "${CD2_HOST}" ] && CD2_HOST="${DEFAULT_CD2_HOST}"
+    [ -z "${CD2_PORT}" ] && CD2_PORT="${DEFAULT_CD2_PORT}"
+    [ -z "${STRM_OUT}" ] && STRM_OUT="${DEFAULT_STRM_ROOT}"
+    [ -z "${PORT}" ] && PORT="${DEFAULT_PORT}"
+    [ -z "${BASE_IMAGE}" ] && BASE_IMAGE="${DEFAULT_BASE_IMAGE}"
+
+    mkdir -p "$(dirname "${COMPOSE_FILE}")" || fail "无法写入 ${COMPOSE_FILE}"
+
+    {
+        echo "# 本文件由 picklight 的安装/配置向导自动生成，手工修改会在下次配置变更时被覆盖。"
+        echo "# 路径与文件名都刻意避开 appcenter 的 docker 项目探测（不用 docker/docker-compose.yaml），"
+        echo "# 容器生命周期由本应用的 cmd 脚本负责，不由应用中心托管。"
+        echo "services:"
+        echo "  picklight:"
+        echo "    image: ${IMAGE}"
+        echo "    container_name: ${CONTAINER_NAME}"
+        echo "    restart: unless-stopped"
+        echo "    # 源码随之安装到 ${SRC_DIR}，镜像不存在时 docker compose 会就地构建"
+        echo "    build:"
+        echo "      context: \"${SRC_DIR}\""
+        echo "      dockerfile: Dockerfile"
+        echo "      args:"
+        echo "        BASE_IMAGE: \"${BASE_IMAGE}\""
+        echo "    environment:"
+        echo "      - TZ=Asia/Shanghai"
+        echo "      # 数据目录：config.toml / mdc.db / jwt_secret / 增量清单"
+        echo "      - MDC_CONFIG_PATH=/data"
+        echo "      - MDC_BIND=0.0.0.0:${INTERNAL_PORT}"
+        echo "      # 容器里没有桌面浏览器，别去开"
+        echo "      - MDC_NO_OPEN_BROWSER=1"
+        echo "    ports:"
+        echo "      - '${PORT}:${INTERNAL_PORT}'"
+        echo "    volumes:"
+        echo "      # 应用数据（data-share，卸载保留）"
+        echo "      - \"${DATA_DIR}:/data\""
+        if is_true "${RSLAVE}"; then
+            echo "      # CD2 挂载根：rslave 传播，CD2 掉盘重挂后容器内能自动看到；左右路径必须一致"
+            echo "      - type: bind"
+            echo "        source: \"${MOUNT_ROOT}\""
+            echo "        target: \"${MOUNT_ROOT}\""
+            echo "        bind:"
+            echo "          propagation: rslave"
+        else
+            echo "      # CD2 挂载根：普通绑定（rslave 已关闭）；左右路径必须一致"
+            echo "      - \"${MOUNT_ROOT}:${MOUNT_ROOT}\""
+        fi
+        echo "      # strm / nfo / 海报落地处，给 Emby、Jellyfin 扫"
+        echo "      - \"${STRM_OUT}:${CONTAINER_STRM}\""
+        echo "networks:"
+        echo "  default:"
+        echo "    name: picklight-net"
+    } > "${COMPOSE_FILE}" || fail "写入 ${COMPOSE_FILE} 失败。"
+
+    save_conf
+    return 0
+}
+
+base_image_candidates() {
+    printf '%s\n' \
+        "$(wiz base_image)" \
+        "${BASE_IMAGE_WORKING:-}" \
+        ${BASE_IMAGE_MIRRORS}
+}
+
+# 首次安装：把向导里的网盘 / 输出目录写进 config.toml，用户进界面就不用再填一遍。
+# ⚠️ 只在 config.toml 不存在时播种 —— 之后一律以应用界面里的设置为准。
+seed_app_config() {
+    local cfg="${DATA_DIR}/config.toml"
+    if [ -f "${cfg}" ]; then
+        return 0
+    fi
+    local esc_host esc_mount esc_strm
+    esc_host="$(json_escape "${CD2_HOST}")"
+    esc_mount="$(json_escape "${MOUNT_ROOT}")"
+    esc_strm="$(json_escape "${CONTAINER_STRM}")"
+    {
+        echo "# 由飞牛安装向导首次生成，之后请在拾光界面里改（本文件只在首次安装时播种）。"
+        echo "[netdisk]"
+        echo "host = \"${esc_host}\"          # CD2 的 HTTP 地址（不要填 127.0.0.1，Emby 也要能访问）"
+        echo "port = ${CD2_PORT}"
+        echo "mount_root = \"${esc_mount}\"   # CD2 挂载根在容器里的绝对路径（与卷挂载一致）"
+        echo "[strm]"
+        echo "root = \"${esc_strm}\"          # strm / nfo / 海报输出，Emby 扫这里"
+    } > "${cfg}" 2>/dev/null \
+        || warn "写入初始配置 ${cfg} 失败，请进入拾光界面手工填写网盘地址与输出目录。"
+    return 0
+}
+
+# 环境类死因（跟镜像源完全无关，换源纯属浪费）：构建还没开始就被文件系统挡住了。
+PERM_FATAL_RE="mkdir [^ ]+: permission denied|operation not permitted|read-only file system|no space left on device"
+PERM_HINT_RE="permission denied|operation not permitted|read-only file system|no space left"
+SOCK_PERM_RE="docker\.sock|connect to the Docker daemon socket"
+
+ensure_image() {
+    local force_build="${1:-0}"
+
+    docker_env
+
+    if ! command -v docker >/dev/null 2>&1; then
+        fail "系统里找不到 docker 命令 —— 本应用依赖飞牛的 Docker 服务。
+请先在「应用中心」里装好 / 启用 Docker，再重试安装。"
+    fi
+
+    if [ "${force_build}" != "1" ] && docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+        RENDER_FORCE_BASE_IMAGE=""
+        return 0
+    fi
+
+    local cand out rc n=0 tried="" last_out=""
+    for cand in $(base_image_candidates); do
+        [ -z "${cand}" ] && continue
+        case " ${tried} " in *" ${cand} "*) continue ;; esac
+        tried="${tried} ${cand}"
+        n=$((n + 1))
+
+        RENDER_FORCE_BASE_IMAGE="${cand}"
+        # 构建阶段要用最终渲染出的 compose（context 指向 src、BASE_IMAGE 传进去）
+        render_compose
+
+        echo "[picklight] 第 ${n} 次尝试构建镜像，基础镜像：${cand}"
+        # 不能写成 `if ! docker compose build | tail`：管道会把退出码换成 tail 的
+        out="$(docker compose -f "${COMPOSE_FILE}" build 2>&1)"; rc=$?
+        echo "${out}" | tail -12
+
+        if [ ${rc} -eq 0 ] && docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+            RENDER_FORCE_BASE_IMAGE=""
+            BASE_IMAGE_WORKING="${cand}"
+            save_conf
+            echo "[picklight] 镜像 ${IMAGE} 构建成功（基础镜像 ${cand}）。"
+            return 0
+        fi
+
+        last_out="${out}"
+        if echo "${out}" | tail -3 | grep -qiE "${PERM_FATAL_RE}"; then
+            warn "第一条错误就是文件系统/权限问题，换镜像源不会有帮助，停止重试。"
+            break
+        fi
+        warn "基础镜像 ${cand} 拉取/构建失败，换下一个镜像源重试。"
+    done
+
+    RENDER_FORCE_BASE_IMAGE=""
+    local last3
+    last3="$(echo "${last_out}" | tail -3 | tr '\n' ' ')"
+    if echo "${last3}" | grep -qiE "${SOCK_PERM_RE}"; then
+        fail "镜像构建失败：这是 docker socket 权限问题，跟「镜像源拉不动」完全不同 ——
+fnOS 上 /var/run/docker.sock 默认 root:docker 0660，本包的 fpk/config/privilege
+必须带 join-groups: [\"docker\"]（本包已带）。若仍然报这条错，请到「应用中心」
+卸载本应用后重装新包 —— join-groups 是 install 阶段由 appcenter 建的，单纯升级未必重做。"
+    fi
+    if echo "${last3}" | grep -qiE "${PERM_HINT_RE}"; then
+        fail "镜像构建失败：这【不是】镜像源的问题，docker 在真正干活之前就被文件权限挡住了。
+请在飞牛「Docker → 设置」里检查数据目录是否可写，或卸载后重装本应用。"
+    fi
+    fail "镜像构建失败：已尝试 ${n} 个基础镜像源，最后一条错误：${last3}
+请二选一：
+  1) 在飞牛「Docker → 设置 → 镜像加速」里配一个能用的加速源（一次配好永久生效）；
+  2) 在应用的「设置」里把『基础镜像』改成你 NAS 能访问的地址，例如
+     docker.1ms.run/library/debian:bookworm-slim"
+}
+
+# 真正拉起容器
+_do_up() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose -f "${COMPOSE_FILE}" up -d --force-recreate 2>&1
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose -f "${COMPOSE_FILE}" up -d --force-recreate 2>&1
+    else
+        echo "docker compose 不可用"
+        return 1
+    fi
+}
+
+# 按新配置重建容器。宿主文件系统不支持挂载传播（rslave）时自动关掉重试一次。
+recreate_container() {
+    local out rc
+    out="$(_do_up)"; rc=$?
+
+    if [ ${rc} -ne 0 ] && echo "${out}" | grep -qiE "not a shared|slave mount|propagation|mount path"; then
+        warn "宿主挂载不支持 rslave 传播，已自动切换为普通绑定重试（CD2 掉盘重挂后需重启一次容器）。"
+        RENDER_NO_RSLAVE=1
+        render_compose
+        out="$(_do_up)"; rc=$?
+    fi
+
+    echo "${out}" | tail -8
+    return 0
+}
+
+# 所有生命周期脚本都 source 本文件，这里统一兜一次，避免哪个脚本漏调。
+docker_env

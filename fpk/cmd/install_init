@@ -1,0 +1,11 @@
+#!/bin/bash
+### 安装前执行。本包没有内嵌离线镜像归档（标准版：在 NAS 上就地构建），
+### 只做一件事 —— 记下 docker 运行环境，出问题时的诊断信息才对得上。
+
+source "$(dirname "$0")/common"
+
+: > "${WARN_FILE}" 2>/dev/null
+
+echo "[picklight] docker 运行环境：HOME=${HOME} DOCKER_CONFIG=${DOCKER_CONFIG:-}（原始 HOME=${DOCKER_ORIG_HOME:-空}）"
+
+exit 0

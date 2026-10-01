@@ -1,0 +1,16 @@
+appname               = picklight
+version               = 0.1.0
+display_name          = 拾光 PickLight
+desc                  = 扫描 CloudDrive2 挂载的网盘影视目录，按番号刮削元数据（NFO / 海报），并生成 Emby、Jellyfin 可直接扫的 .strm 直链，视频不搬家。首次安装会在 NAS 上本地构建镜像，约需 3-8 分钟。
+platform              = all
+source                = thirdparty
+maintainer            = picklight
+distributor           = picklight
+service_port          = 9208
+checkport             = true
+os_min_version        = 0.9.0
+desktop_uidir         = ui
+desktop_applaunchname = picklight.Application
+ctl_stop              = true
+disable_authorization_path = true
+changelog             = 0.1.0：首个飞牛版。安装时在 NAS 上就地构建镜像（源码随包安装，改代码只需重新打 fpk）；向导填写 CD2 挂载目录、strm 输出目录与访问端口，首次装完自动写 config.toml，不用再进界面填一遍。桌面入口端口跟随向导（默认 9208）。

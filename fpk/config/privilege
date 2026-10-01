@@ -1,0 +1,9 @@
+{
+    "defaults":
+    {
+        "run-as": "package"
+    },
+    "username": "picklight",
+    "groupname": "picklight",
+    "join-groups": ["docker"]
+}
