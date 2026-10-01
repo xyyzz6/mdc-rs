@@ -195,6 +195,14 @@ function App() {
 
   const [px, setPx] = useState<ProxyStatus | null>(null);
   const [pxLog, setPxLog] = useState('');
+  // 🔴 表单草稿 + 脏标记（MuMu 真机复现的坑）：设置页每 4s 轮询 /api/proxy/status，
+  //    `loadProxy` 原本无条件 `setPx`，会把用户**正在编辑、还没保存**的输入框刷回
+  //    服务端旧值 —— 首次填「订阅链接」时最明显：字打完一下就没了（正是
+  //    「填进去就被删」的现象；服务端其实从来没收到过这个 URL）。
+  //    所以：有未保存改动时 UI 一律读本地草稿，轮询只更新状态字段（phase 等）。
+  const [pxDraft, setPxDraft] = useState<ProxyCfg | null>(null);
+  const [pxDirty, setPxDirty] = useState(false);
+  const pxDirtyRef = useRef(false);
   // 节点选择（内核 Running 时从 mihomo external-controller 拉 Selector 分组）
   const [groups, setGroups] = useState<{ name: string; now: string; all: string[] }[] | null>(null);
 
@@ -499,15 +507,41 @@ function App() {
       .catch((e) => setMsg(String(e)));
   };
 
-  const loadProxy = () => api<ProxyStatus>('/api/proxy/status').then(setPx).catch(() => {});
+  /// 表单只读值：脏的时候读草稿，否则读服务端那份。
+  const pxVal: ProxyCfg | null = px ? pxDraft ?? px.proxy : null;
+
+  /// 改一个字段就进草稿态（UI 立刻用草稿，轮询不再覆盖它）。
+  const editPx = (patch: Partial<ProxyCfg>) => {
+    const cur = pxDraft ?? px?.proxy;
+    if (!cur) return;
+    setPxDraft({ ...cur, ...patch });
+    pxDirtyRef.current = true;
+    setPxDirty(true);
+  };
+
+  const loadProxy = () =>
+    api<ProxyStatus>('/api/proxy/status')
+      .then((d) => {
+        // 轮询回来照样 setPx（phase/kernel_found 要跟着变），
+        // 但**不许**用它覆盖用户还没保存的输入。
+        setPx(d);
+        if (!pxDirtyRef.current) setPxDraft(null);
+      })
+      .catch(() => {});
 
   const saveProxy = (enabled?: boolean) => {
     if (!px) return;
-    const body = { proxy: { ...px.proxy, enabled: enabled ?? px.proxy.enabled } };
+    const cur = pxDraft ?? px.proxy;
+    const body = { proxy: { ...cur, enabled: enabled ?? cur.enabled } };
     api('/api/proxy/config', { method: 'PUT', body: JSON.stringify(body) })
-      .then(() => {
+      .then((r) => {
+        // 保存成功才退出草稿态：这样失败时输入框里的内容不会丢
+        pxDirtyRef.current = false;
+        setPxDirty(false);
+        setPxDraft(null);
         setMsg(enabled === false ? '已停用内置内核（回落外部代理/直连）' : '代理配置已保存，正在后台拉起内核…');
         setTimeout(loadProxy, 900);
+        return r;
       })
       .catch((e) => setMsg(String(e)));
   };
@@ -908,7 +942,7 @@ function App() {
             内核二进制不随源码分发 —— 找不到就按提示放一个，或改用「外部代理」。
           </p>
 
-          {px && (
+          {px && pxVal && (
             <>
               <p className="kv">
                 实际出网：<code>{px.effective_proxy ?? '直连（无代理）'}</code>
@@ -927,40 +961,43 @@ function App() {
 
               <div className="grid">
                 <label className="lbl wide">订阅链接（只填你自己的，软件不预置任何节点）
-                  <input value={px.proxy.subscribe_url ?? ''} placeholder="https://..."
-                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, subscribe_url: e.target.value || null } })} />
+                  <input value={pxVal.subscribe_url ?? ''} placeholder="https://..."
+                    onChange={(e) => editPx({ subscribe_url: e.target.value || null })} />
                 </label>
                 <label className="lbl">内核
-                  <select value={px.proxy.kernel}
-                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel: e.target.value } })}>
-                    <option value="mihomo">mihomo（Clash.Meta，推荐）</option>
-                    <option value="sing-box">sing-box（尚未实现）</option>
+                  <select value={pxVal.kernel}
+                    onChange={(e) => editPx({ kernel: e.target.value })}>
+                  <option value="mihomo">mihomo（Clash.Meta，推荐）</option>
+                  <option value="sing-box">sing-box（尚未实现）</option>
                   </select>
                 </label>
                 <label className="lbl">监听端口
-                  <input type="number" value={px.proxy.port}
-                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, port: Number(e.target.value) || 17890 } })} />
+                  <input type="number" value={pxVal.port}
+                    onChange={(e) => editPx({ port: Number(e.target.value) || 17890 })} />
                 </label>
                 <label className="lbl">外部代理（内核没起来时回落）
-                  <input value={px.proxy.external_proxy ?? ''} placeholder="http://127.0.0.1:7890"
-                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, external_proxy: e.target.value || null } })} />
+                  <input value={pxVal.external_proxy ?? ''} placeholder="http://127.0.0.1:7890"
+                    onChange={(e) => editPx({ external_proxy: e.target.value || null })} />
                 </label>
                 <label className="lbl">内核路径（留空自动探测）
-                  <input value={px.proxy.kernel_path ?? ''} placeholder="C:\...\mihomo.exe"
-                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, kernel_path: e.target.value || null } })} />
+                  <input value={pxVal.kernel_path ?? ''} placeholder="C:\...\mihomo.exe"
+                    onChange={(e) => editPx({ kernel_path: e.target.value || null })} />
                 </label>
                 <label className="lbl check wide">
-                  <input type="checkbox" checked={px.proxy.expose_lan}
-                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, expose_lan: e.target.checked } })} />
+                  <input type="checkbox" checked={pxVal.expose_lan}
+                    onChange={(e) => editPx({ expose_lan: e.target.checked })} />
                   放开到局域网（让 Emby / CD2 共用；默认只本机）
                 </label>
                 <label className="lbl check wide">
-                  <input type="checkbox" checked={px.proxy.enabled}
-                    onChange={(e) => setPx({ ...px, proxy: { ...px.proxy, enabled: e.target.checked } })} />
+                  <input type="checkbox" checked={pxVal.enabled}
+                    onChange={(e) => editPx({ enabled: e.target.checked })} />
                   启用内置内核
                 </label>
               </div>
             </>
+          )}
+          {pxDirty && (
+            <p className="hint st-warn">有未保存的改动 —— 保存前输入框不会被自动刷新覆盖。</p>
           )}
 
           <div className="row">
